@@ -129,7 +129,7 @@ Then start the chat:
 python ultra_simple_chat.py
 
 # With custom voice and model
-python ultra_simple_chat.py --voice fable --llm-model llama2
+python ultra_simple_chat.py --voice fable --llm-model gemma3:latest
 ```
 
 ## 🎙️ Available Voices

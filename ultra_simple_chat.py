@@ -200,7 +200,7 @@ class SimpleTextChunker:
 def main():
     parser = argparse.ArgumentParser(description="Ultra Simple Real-time LLM + TTS Chat")
     parser.add_argument("--llm-url", default="http://localhost:11434", help="Ollama URL")
-    parser.add_argument("--llm-model", default="gemma2:latest", help="LLM model")
+    parser.add_argument("--llm-model", default="gemma3:latest", help="LLM model")
     parser.add_argument("--tts-url", default="http://localhost:5001", help="TTS URL")
     parser.add_argument("--voice", default="alloy", help="TTS voice")
     parser.add_argument("--system-prompt", help="System prompt")

@@ -327,4 +327,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - OpenAI - API compatibility standards
 - [davidbrowne17](https://github.com/davidbrowne17/chatterbox-streaming) - Streaming version
 
+## Disclaimer
+Don't use this model to do bad things.
+
 **⭐ Star this repository if you find it useful!**

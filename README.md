@@ -118,7 +118,7 @@ First, ensure Ollama is running:
 
 ```bash
 # Install and run Ollama
-ollama pull gemma2:latest
+ollama pull gemma3:latest
 ollama serve
 ```
 

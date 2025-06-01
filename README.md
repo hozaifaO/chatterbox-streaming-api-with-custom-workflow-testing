@@ -1,7 +1,7 @@
 # Chatterbox Streaming API Docker
 
 
-A high-performance, real-time text-to-speech API with streaming capabilities, featuring OpenAI-compatible endpoints and multiple voice support. Built with FastAPI and optimized for Docker deployment with GPU acceleration.
+A high-performance, text-to-speech API with streaming capabilities, featuring OpenAI-compatible endpoints and multiple voice support. Built with FastAPI and optimised for Docker deployment with GPU acceleration.
 
 ## 🚀 Features
 

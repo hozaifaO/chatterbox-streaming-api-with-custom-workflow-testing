@@ -2,8 +2,7 @@
 """
 Realtime Seamless Emotional TTS Chat
 -----------------------------------
-Plays speech **while** it downloads so you hear the response almost
-immediately and without the tiny gaps caused by buffering underruns.
+
 """
 
 from __future__ import annotations

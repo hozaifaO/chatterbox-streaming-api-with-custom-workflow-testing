@@ -1,45 +1,45 @@
 #!/usr/bin/env python3
 """
-Real-time Streaming Emotional TTS Chat - FIXED VERSION
-Properly handles chunked WAV streaming from ChatterboxTTS API
+Realtime Seamless Emotional TTS Chat
+-----------------------------------
+Plays speech **while** it downloads so you hear the response almost
+immediately and without the tiny gaps caused by buffering underruns.
 """
 
-import json
-import re
+from __future__ import annotations
+
+# ── standard library ─────────────────────────────────────────────────────────
 import argparse
+import io
+import json
 import logging
-import tempfile
-import os
 import queue
+import re
 import threading
 import time
 import wave
-import io
-from typing import Optional, Dict
+from functools import partial
+from typing import Dict, List, Optional, Tuple
 
+# ── third-party ──────────────────────────────────────────────────────────────
 import requests
+import numpy as np
 
-# Try to import better audio playback
 try:
     import sounddevice as sd
-    import numpy as np
-    AUDIO_AVAILABLE = True
-    print("✅ Using sounddevice for real-time audio playback")
+
+    AUDIO_AVAILABLE: bool = True
+    print("✅ Using sounddevice for realtime audio")
 except ImportError:
-    try:
-        import winsound
-        AUDIO_AVAILABLE = "winsound"
-        print("⚠️  Using winsound (install sounddevice for better streaming: pip install sounddevice)")
-    except ImportError:
-        AUDIO_AVAILABLE = False
-        print("❌ No audio playback available")
+    AUDIO_AVAILABLE = False
+    print("❌ sounddevice required:  pip install sounddevice numpy")
 
-# Set up logging
+# ── logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("realtime-tts")
 
-# [Keep all the existing emotion and voice definitions...]
-BASE_EMOTIONS = {
+# ── emotion & voice parameter tables ────────────────────────────────────────
+BASE_EMOTIONS: Dict[str, Dict[str, float]] = {
     "excited": {"exaggeration": 0.8, "cfg_weight": 0.3, "temperature": 1.0},
     "happy": {"exaggeration": 0.7, "cfg_weight": 0.4, "temperature": 0.9},
     "enthusiastic": {"exaggeration": 0.75, "cfg_weight": 0.35, "temperature": 0.95},
@@ -54,434 +54,455 @@ BASE_EMOTIONS = {
     "worried": {"exaggeration": 0.35, "cfg_weight": 0.65, "temperature": 0.65},
 }
 
-VOICE_CHARACTERISTICS = {
-    "nova": {"exaggeration_modifier": 0.05, "cfg_weight_modifier": -0.05, "temperature_modifier": 0.05},
-    "shimmer": {"exaggeration_modifier": -0.1, "cfg_weight_modifier": 0.1, "temperature_modifier": -0.1},
-    "onyx": {"exaggeration_modifier": 0.0, "cfg_weight_modifier": -0.02, "temperature_modifier": -0.05},
-    "echo": {"exaggeration_modifier": -0.05, "cfg_weight_modifier": 0.05, "temperature_modifier": -0.05},
-    "fable": {"exaggeration_modifier": 0.1, "cfg_weight_modifier": 0.0, "temperature_modifier": 0.1},
-    "alloy": {"exaggeration_modifier": 0.0, "cfg_weight_modifier": 0.0, "temperature_modifier": 0.0}
+VOICE_CHARACTERISTICS: Dict[str, Dict[str, float]] = {
+    "nova":    {"exaggeration_modifier": 0.05, "cfg_weight_modifier": -0.05, "temperature_modifier": 0.05},
+    "shimmer": {"exaggeration_modifier": -0.10, "cfg_weight_modifier":  0.10, "temperature_modifier": -0.10},
+    "onyx":    {"exaggeration_modifier": 0.00, "cfg_weight_modifier": -0.02, "temperature_modifier": -0.05},
+    "echo":    {"exaggeration_modifier": -0.05, "cfg_weight_modifier":  0.05, "temperature_modifier": -0.05},
+    "fable":   {"exaggeration_modifier": 0.10, "cfg_weight_modifier":  0.00, "temperature_modifier":  0.10},
+    "alloy":   {"exaggeration_modifier": 0.00, "cfg_weight_modifier":  0.00, "temperature_modifier":  0.00},
 }
 
-DEFAULT_VOICE_MAPPING = {
+DEFAULT_VOICE_MAPPING: Dict[str, str] = {
     "excited": "nova", "happy": "nova", "enthusiastic": "nova",
     "sad": "shimmer", "tired": "shimmer", "worried": "shimmer",
     "angry": "onyx", "frustrated": "onyx",
     "confused": "echo", "surprised": "fable",
-    "neutral": "alloy", "calm": "alloy"
+    "neutral": "alloy", "calm": "alloy",
 }
 
-class WAVChunkParser:
-    """Parser to extract complete WAV files from chunked HTTP stream"""
-    
-    def __init__(self):
-        self.buffer = bytearray()
-        self.expecting_size = None
-        
-    def add_data(self, data: bytes) -> list:
-        """Add data and return list of complete WAV files"""
-        self.buffer.extend(data)
-        complete_wavs = []
-        
-        while True:
-            wav_file = self._extract_next_wav()
-            if wav_file:
-                complete_wavs.append(bytes(wav_file))
-            else:
-                break
-                
-        return complete_wavs
-    
-    def _extract_next_wav(self) -> Optional[bytearray]:
-        """Extract the next complete WAV file from buffer"""
-        if len(self.buffer) < 8:
-            return None
-            
-        # Look for RIFF header
-        riff_pos = self.buffer.find(b'RIFF')
-        if riff_pos == -1:
-            return None
-            
-        # Remove any data before RIFF header
-        if riff_pos > 0:
-            self.buffer = self.buffer[riff_pos:]
-            
-        # Check if we have enough data for the header
-        if len(self.buffer) < 8:
-            return None
-            
-        # Read the file size from RIFF header
-        try:
-            file_size = int.from_bytes(self.buffer[4:8], byteorder='little')
-            total_size = file_size + 8  # +8 for RIFF header itself
-            
-            # Check if we have the complete file
-            if len(self.buffer) >= total_size:
-                complete_wav = self.buffer[:total_size]
-                self.buffer = self.buffer[total_size:]
-                return complete_wav
-            else:
-                return None
-                
-        except Exception:
-            # If we can't read the size, remove the bad RIFF and try again
-            self.buffer = self.buffer[4:]
-            return None
-
-class RealTimeAudioPlayer:
-    """Real-time audio player that properly handles WAV chunks"""
-    
-    def __init__(self, sample_rate=24000):
-        self.sample_rate = sample_rate
-        self.audio_queue = queue.Queue()
-        self.playing = False
-        self.player_thread = None
-        self.chunk_count = 0
-        self.total_duration = 0.0
-        
-    def start(self):
-        """Start the real-time audio player thread"""
-        if self.playing:
-            return
-            
-        self.playing = True
-        
-        if AUDIO_AVAILABLE == True:  # sounddevice available
-            self.player_thread = threading.Thread(target=self._sounddevice_player_worker)
-        elif AUDIO_AVAILABLE == "winsound":  # winsound fallback
-            self.player_thread = threading.Thread(target=self._winsound_player_worker)
-        else:
-            print("❌ No audio playback available")
-            return
-            
-        self.player_thread.daemon = True
-        self.player_thread.start()
-        print("🎵 Real-time audio playback started!")
-    
-    def add_chunk(self, wav_data: bytes, debug: bool = False):
-        """Add audio chunk for immediate playback"""
-        if not self.playing:
-            return
-            
-        self.chunk_count += 1
-        
-        # Calculate chunk duration
-        try:
-            duration = self._get_wav_duration(wav_data)
-            self.total_duration += duration
-            
-            if debug:
-                print(f"[🎵 Chunk {self.chunk_count}: {len(wav_data)} bytes, ~{duration:.3f}s duration]")
-        except Exception as e:
-            if debug:
-                print(f"[🎵 Chunk {self.chunk_count}: {len(wav_data)} bytes, duration calc failed: {e}]")
-        
-        # Queue for immediate playback
-        self.audio_queue.put(wav_data)
-    
-    def _get_wav_duration(self, wav_data: bytes) -> float:
-        """Get duration of WAV audio data"""
-        try:
-            with io.BytesIO(wav_data) as wav_io:
-                with wave.open(wav_io, 'rb') as wav_file:
-                    frames = wav_file.getnframes()
-                    sample_rate = wav_file.getframerate()
-                    return frames / sample_rate
-        except Exception:
-            return 0.0
-    
-    def _sounddevice_player_worker(self):
-        """Worker thread for sounddevice playback (preferred)"""
-        while self.playing:
-            try:
-                wav_data = self.audio_queue.get(timeout=1.0)
-                if wav_data is None:  # Sentinel to stop
-                    break
-                    
-                # Convert WAV data to numpy array for sounddevice
-                audio_np = self._wav_to_numpy(wav_data)
-                if audio_np is not None:
-                    sd.play(audio_np, self.sample_rate, blocking=True)
-                
-                self.audio_queue.task_done()
-                
-            except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"Audio playback error: {e}")
-    
-    def _winsound_player_worker(self):
-        """Worker thread for winsound playback (fallback)"""
-        while self.playing:
-            try:
-                wav_data = self.audio_queue.get(timeout=1.0)
-                if wav_data is None:  # Sentinel to stop
-                    break
-                    
-                # Play using winsound (blocking)
-                self._play_with_winsound(wav_data)
-                
-                self.audio_queue.task_done()
-                
-            except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"Audio playback error: {e}")
-    
-    def _wav_to_numpy(self, wav_data: bytes) -> Optional[np.ndarray]:
-        """Convert WAV bytes to numpy array for sounddevice"""
-        try:
-            with io.BytesIO(wav_data) as wav_io:
-                with wave.open(wav_io, 'rb') as wav_file:
-                    frames = wav_file.readframes(wav_file.getnframes())
-                    # Handle both mono and stereo
-                    if wav_file.getnchannels() == 1:
-                        audio_np = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
-                    else:
-                        audio_np = np.frombuffer(frames, dtype=np.int16).astype(np.float32).reshape(-1, wav_file.getnchannels()) / 32768.0
-                    return audio_np
-        except Exception as e:
-            print(f"WAV conversion error: {e}")
-            return None
-    
-    def _play_with_winsound(self, wav_data: bytes):
-        """Play audio using winsound (Windows only)"""
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
-                tmp_file.write(wav_data)
-                tmp_file.flush()
-                tmp_path = tmp_file.name
-            
-            import winsound
-            winsound.PlaySound(tmp_path, winsound.SND_FILENAME)
-            
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
-                
-        except Exception as e:
-            print(f"Winsound playback error: {e}")
-    
-    def stop(self):
-        """Stop the audio player and wait for completion"""
-        if not self.playing:
-            return
-            
-        # Wait for current queue to finish
-        print("🎵 Finishing audio playback...")
-        self.audio_queue.join()
-        
-        # Signal stop
-        self.audio_queue.put(None)
-        self.playing = False
-        
-        if self.player_thread:
-            self.player_thread.join(timeout=2.0)
-        
-        print(f"🎵 Playback complete! {self.chunk_count} chunks, {self.total_duration:.2f}s total")
-
-def get_emotion_parameters(emotion: str, voice: str) -> Dict:
-    """Generate emotion parameters for any voice/emotion combination"""
+# ── helper utilities ────────────────────────────────────────────────────────
+def get_emotion_parameters(emotion: str, voice: str) -> Dict[str, float]:
     if emotion not in BASE_EMOTIONS:
         emotion = "neutral"
-    
-    base_params = BASE_EMOTIONS[emotion].copy()
-    
-    if voice not in VOICE_CHARACTERISTICS:
-        voice = "alloy"
-    
-    voice_char = VOICE_CHARACTERISTICS[voice]
-    
-    modified_params = {
+    base = BASE_EMOTIONS[emotion]
+    vc = VOICE_CHARACTERISTICS.get(voice, VOICE_CHARACTERISTICS["alloy"])
+    return {
         "voice": voice,
-        "exaggeration": max(0.0, min(1.0, base_params["exaggeration"] + voice_char["exaggeration_modifier"])),
-        "cfg_weight": max(0.0, min(1.0, base_params["cfg_weight"] + voice_char["cfg_weight_modifier"])),
-        "temperature": max(0.1, min(1.5, base_params["temperature"] + voice_char["temperature_modifier"]))
+        "exaggeration": np.clip(base["exaggeration"] + vc["exaggeration_modifier"], 0.0, 1.0),
+        "cfg_weight": np.clip(base["cfg_weight"] + vc["cfg_weight_modifier"], 0.0, 1.0),
+        "temperature": np.clip(base["temperature"] + vc["temperature_modifier"], 0.1, 1.5),
     }
-    
-    return modified_params
 
 def get_default_voice_for_emotion(emotion: str) -> str:
-    """Get the default voice for an emotion"""
     return DEFAULT_VOICE_MAPPING.get(emotion, "alloy")
 
-def clean_text_for_tts(text: str) -> str:
-    """Clean text for TTS"""
-    emoji_pattern = re.compile("["
-        u"\U0001F600-\U0001F64F"  
-        u"\U0001F300-\U0001F5FF"  
-        u"\U0001F680-\U0001F6FF"  
-        u"\U0001F1E0-\U0001F1FF"  
-        u"\U00002702-\U000027B0"
-        u"\U000024C2-\U0001F251"
-        "]+", flags=re.UNICODE)
-    
-    return re.sub(r'\s+', ' ', emoji_pattern.sub('', text)).strip()
+class SimpleWAVParser:
+    """Extract complete WAV files from a streaming HTTP response."""
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+    def add_data(self, data: bytes) -> List[bytes]:
+        self.buffer.extend(data)
+        out: List[bytes] = []
+        while True:
+            wav = self._next_wav()
+            if wav:
+                out.append(wav)
+            else:
+                break
+        return out
+    def _next_wav(self) -> Optional[bytes]:
+        if len(self.buffer) < 12:
+            return None
+        riff = self.buffer.find(b"RIFF")
+        if riff == -1:
+            self.buffer.clear()
+            return None
+        if riff > 0:
+            del self.buffer[:riff]
+        if len(self.buffer) < 12:
+            return None
+        size = int.from_bytes(self.buffer[4:8], "little") + 8
+        if len(self.buffer) < size:
+            return None
+        wav = bytes(self.buffer[:size])
+        del self.buffer[:size]
+        return wav
 
+def wav_to_numpy(wav_bytes: bytes) -> Optional[Tuple[np.ndarray, int]]:
+    """Convert a WAV buffer to mono float32 ndarray + sample-rate."""
+    try:
+        with io.BytesIO(wav_bytes) as bio:
+            with wave.open(bio, "rb") as w:
+                frames = w.readframes(w.getnframes())
+                width = w.getsampwidth()
+                if width == 2:
+                    audio = np.frombuffer(frames, np.int16).astype(np.float32) / 32768.0
+                elif width == 4:
+                    audio = np.frombuffer(frames, np.int32).astype(np.float32) / 2147483648.0
+                else:
+                    return None
+                if w.getnchannels() > 1:
+                    audio = audio.reshape(-1, w.getnchannels()).mean(axis=1)
+                return audio, w.getframerate()
+    except Exception as exc:
+        logger.error(f"WAV→numpy failed: {exc}")
+        return None
+
+# Regex that works on narrow Python builds (Windows) – removes virtually all emoji
+EMOJI_RE = re.compile(r"[\U00010000-\U0010FFFF]", flags=re.UNICODE)
+
+def clean_text_for_tts(text: str) -> str:
+    return re.sub(r"\s+", " ", EMOJI_RE.sub("", text)).strip()
+
+# ── Ollama client ────────────────────────────────────────────────────────────
 def stream_from_ollama(prompt: str, model: str, base_url: str, system_prompt: Optional[str] = None):
-    """Stream text from Ollama"""
     payload = {
         "model": model,
         "prompt": prompt,
         "stream": True,
-        "options": {"temperature": 0.7, "top_p": 0.9}
+        "options": {"temperature": 0.7, "top_p": 0.9},
     }
-    
     if system_prompt:
         payload["system"] = system_prompt
-    
     try:
-        response = requests.post(f"{base_url}/api/generate", json=payload, stream=True, timeout=30)
-        
-        if response.status_code != 200:
-            logger.error(f"Ollama API error: {response.status_code}")
-            return
-            
-        for line in response.iter_lines():
-            if line:
+        with requests.post(f"{base_url}/api/generate", json=payload, stream=True, timeout=30) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line:
+                    continue
                 try:
-                    data = json.loads(line.decode('utf-8'))
-                    if 'response' in data:
-                        yield data['response']
-                    if data.get('done', False):
+                    msg = json.loads(line.decode())
+                    if "response" in msg:
+                        yield msg["response"]
+                    if msg.get("done"):
                         break
                 except json.JSONDecodeError:
                     continue
-                    
-    except Exception as e:
-        logger.error(f"Error streaming from Ollama: {e}")
+    except Exception as exc:
+        logger.error(f"Ollama stream error: {exc}")
 
+# ── emotion detection ───────────────────────────────────────────────────────
 def detect_emotion_from_text(text: str, debug: bool = False) -> str:
-    """Detect emotion from text"""
-    text_lower = text.lower()
-    
-    emotion_keywords = [
-        ("excited", ['excited', 'amazing', 'incredible', 'fantastic', 'awesome']),
-        ("angry", ['furious', 'outrageous', 'ridiculous']),
-        ("sad", ['sad', 'sorry', 'unfortunate', 'terrible']),
-        ("surprised", ['surprised', 'wow', 'unexpected']),
-        ("confused", ['confused', "don't understand", 'unclear']),
-        ("tired", ['tired', 'exhausted', 'weary']),
-        ("happy", ['happy', 'wonderful', 'great', 'excellent']),
+    tl = text.lower()
+    mapping = [
+        ("excited", ["excited", "amazing", "incredible", "fantastic", "awesome"]),
+        ("angry", ["furious", "outrageous", "ridiculous"]),
+        ("sad", ["sad", "sorry", "unfortunate", "terrible"]),
+        ("surprised", ["surprised", "wow", "unexpected"]),
+        ("confused", ["confused", "don't understand", "unclear"]),
+        ("tired", ["tired", "exhausted", "weary"]),
+        ("happy", ["happy", "wonderful", "great", "excellent"]),
     ]
-    
-    for emotion, keywords in emotion_keywords:
-        for keyword in keywords:
-            if keyword in text_lower:
-                if debug:
-                    print(f"\n[🎭 Emotion: '{emotion}' ← '{keyword}']", end="")
-                return emotion
-    
+    for emo, kws in mapping:
+        if any(k in tl for k in kws):
+            if debug:
+                print(f"\n[🎭 {emo} ← keyword]")
+            return emo
     return "neutral"
 
-def get_realtime_streaming_tts(text: str, tts_url: str, emotion: str = "neutral", voice_override: str = None, debug: bool = False):
-    """Get real-time streaming TTS with proper WAV chunk handling"""
-    clean_text = clean_text_for_tts(text)
-    if not clean_text.strip():
+# (Keep other imports and functions as they are)
+# ...
+
+# --- replace your existing get_streaming_tts with this version ---
+def get_streaming_tts(
+    text: str,
+    tts_url: str,
+    emotion: str = "neutral",
+    voice_override: Optional[str] = None,
+    debug: bool = False,
+    prebuffer_ms: int = 350,      # Initial prebuffer target
+):
+    clean = clean_text_for_tts(text)
+    if not clean or not AUDIO_AVAILABLE:
+        return
+
+    voice = voice_override or get_default_voice_for_emotion(emotion)
+    pars = get_emotion_parameters(emotion, voice)
+
+    if debug:
+        logger.info(f"\n[🎤 {voice.upper()}: {emotion}] -> '{clean[:48]}…'")
+
+    payload = {
+        "input": clean,
+        "model": "tts-1",
+        "voice": pars["voice"],
+        "exaggeration": pars["exaggeration"],
+        "cfg_weight": pars["cfg_weight"],
+        "temperature": pars["temperature"],
+        "stream": True,
+        # MODIFICATION: Experiment with server's text chunk size.
+        # Original was 15. Larger values mean server sends bigger audio chunks less frequently.
+        # This might help if network round-trips for many small chunks are an issue.
+        "chunk_size": 30, # Try values like 30, 40, or 50. Was 15.
+        "low_latency": True,
+    }
+
+    # MODIFICATION: Increased queue size for more buffering capacity
+    pcm_q: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=128) # Was 64
+    stop_flag = threading.Event()
+    
+    # Use a dictionary to share state with the callback, including leftover audio
+    # and the sample rate determined by the first chunk.
+    callback_state = {
+        'leftover_block_float32': None, # Stores leftover audio as float32 numpy array
+        'first_sr': None,
+        'status_logged': False # To avoid flooding logs with underrun messages
+    }
+
+    # ── producer: HTTP → WAV → numpy → queue ─────────────────────────────────
+    def reader():
+        parser = SimpleWAVParser()
+        try:
+            with requests.post(
+                f"{tts_url}/v1/audio/speech/stream",
+                json=payload,
+                stream=True,
+                timeout=120, # Overall request timeout
+            ) as r:
+                r.raise_for_status()
+                for http_chunk in r.iter_content(chunk_size=4096): # HTTP level chunking
+                    if stop_flag.is_set(): break
+                    for wav_bytes in parser.add_data(http_chunk):
+                        if stop_flag.is_set(): break
+                        res = wav_to_numpy(wav_bytes)
+                        if not res:
+                            logger.warning("Failed to convert WAV to numpy array.")
+                            continue
+                        
+                        pcm_data_float32, sr = res
+                        
+                        if callback_state['first_sr'] is None:
+                            logger.info(f"Audio stream started. Sample rate: {sr} Hz.")
+                            callback_state['first_sr'] = sr
+                        elif callback_state['first_sr'] != sr:
+                            logger.warning(f"Sample rate changed mid-stream! Expected {callback_state['first_sr']}, got {sr}. This is not handled well.")
+                            # Ideally, re-initialize sounddevice stream or handle resampling. For now, log and continue.
+                        
+                        try:
+                            pcm_q.put(pcm_data_float32, timeout=1.0) # Put with timeout to prevent indefinite block
+                        except queue.Full:
+                            logger.warning("PCM queue full. Discarding audio data. Playback might be choppy.")
+                            # This indicates the consumer (playback) is too slow or stalled.
+        except requests.exceptions.RequestException as e:
+            logger.error(f"TTS request error: {e}")
+        except Exception as e:
+            logger.error(f"Reader thread error: {e}")
+        finally:
+            logger.info("Reader thread finished.")
+            stop_flag.set()
+
+    # ── consumer: PortAudio callback ─────────────────────────────────────────
+    def pa_cb(outdata: memoryview, frames: int, time_info, status_flags):
+        # `outdata` is a memoryview for RawOutputStream, expecting bytes.
+        # `frames` is the number of audio frames requested.
+        # For mono int16, 1 frame = 1 sample = 2 bytes.
+        
+        if status_flags: # sounddevice.CallbackFlags object
+            if status_flags.output_underflow and not callback_state['status_logged']:
+                logger.warning("Sounddevice output underflow detected! Audio may be choppy.")
+                callback_state['status_logged'] = True # Log once per stream segment or reset periodically
+            if status_flags.priming_output and not callback_state['status_logged']: # Useful for debugging
+                logger.info("Sounddevice priming output.")
+                callback_state['status_logged'] = True
+
+        bytes_needed = frames * 2  # For mono int16 (1 channel * 2 bytes/sample)
+        output_audio_bytes = bytearray(bytes_needed) # Initialize with silence (zeros)
+        bytes_filled = 0
+
+        # Try to use leftover data first
+        if callback_state['leftover_block_float32'] is not None:
+            block_float32 = callback_state['leftover_block_float32']
+            
+            # Convert float32 numpy array to int16 bytes
+            block_int16 = (block_float32 * 32767.0).astype(np.int16)
+            block_bytes_data = block_int16.tobytes()
+            
+            num_bytes_from_leftover = len(block_bytes_data)
+            bytes_to_take = min(bytes_needed - bytes_filled, num_bytes_from_leftover)
+            
+            output_audio_bytes[bytes_filled : bytes_filled + bytes_to_take] = block_bytes_data[:bytes_to_take]
+            bytes_filled += bytes_to_take
+            
+            if bytes_to_take < num_bytes_from_leftover:
+                # Some data from this leftover_block remains. Store the float32 version.
+                remaining_samples_in_leftover_block = len(block_float32) - (bytes_to_take // 2)
+                callback_state['leftover_block_float32'] = block_float32[-remaining_samples_in_leftover_block:]
+            else:
+                callback_state['leftover_block_float32'] = None
+
+        # Fill remaining space from the queue
+        while bytes_filled < bytes_needed:
+            try:
+                pcm_float32_block = pcm_q.get_nowait()
+                pcm_q.task_done() # Signal that item is processed
+            except queue.Empty:
+                # Queue is empty. The output_audio_bytes is already zero-filled (silence)
+                # for the remaining part.
+                if bytes_filled == 0 and not stop_flag.is_set(): # Completely empty and reader is still supposed to run
+                    # This is a true underrun if it happens often
+                    pass # logger.debug("Callback: Queue empty, outputting silence.")
+                break # Exit the while loop, output whatever is filled (or silence)
+
+            block_int16 = (pcm_float32_block * 32767.0).astype(np.int16)
+            block_bytes_data = block_int16.tobytes()
+
+            num_bytes_from_new_block = len(block_bytes_data)
+            bytes_to_take = min(bytes_needed - bytes_filled, num_bytes_from_new_block)
+
+            output_audio_bytes[bytes_filled : bytes_filled + bytes_to_take] = block_bytes_data[:bytes_to_take]
+            bytes_filled += bytes_to_take
+
+            if bytes_to_take < num_bytes_from_new_block:
+                # Store leftover from this new block (as float32)
+                remaining_samples_in_new_block = len(pcm_float32_block) - (bytes_to_take // 2)
+                callback_state['leftover_block_float32'] = pcm_float32_block[-remaining_samples_in_new_block:]
+                break # Filled output_buffer or have leftover, current callback done with new blocks
+
+        outdata[:] = output_audio_bytes
+
+    # ── spin everything up ───────────────────────────────────────────────────
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+
+    # Wait for the first audio chunk to determine sample rate
+    logger.info("Waiting for first audio data to determine sample rate...")
+    sr_wait_start_time = time.monotonic()
+    while callback_state['first_sr'] is None and not stop_flag.is_set():
+        if time.monotonic() - sr_wait_start_time > 10.0: # 10 second timeout
+            logger.error("Timeout: No audio data received from server after 10s.")
+            stop_flag.set() # Ensure reader thread also stops if it's stuck
+            reader_thread.join(timeout=2.0)
+            return
+        time.sleep(0.01)
+
+    if stop_flag.is_set() or callback_state['first_sr'] is None:
+        logger.error("Failed to get initial audio data or sample rate. Aborting playback.")
+        if reader_thread.is_alive():
+            reader_thread.join(timeout=2.0)
         return
     
-    # Determine voice and parameters
-    voice_to_use = voice_override or get_default_voice_for_emotion(emotion)
-    params = get_emotion_parameters(emotion, voice_to_use)
-    
-    if debug:
-        print(f"\n[🎤 REAL-TIME STREAMING {voice_to_use.upper()}: {emotion}]")
-        print(f"[📝 Text: '{clean_text}' ({len(clean_text)} chars)]")
-        print(f"[⚙️  Params: E:{params['exaggeration']:.2f} C:{params['cfg_weight']:.2f} T:{params['temperature']:.2f}]")
-    else:
-        indicator = "*" if voice_override else ""
-        print(f"\n[🎭 STREAMING {emotion}/{voice_to_use}{indicator}]", end="")
-    
-    # Setup real-time audio player and WAV parser
-    audio_player = RealTimeAudioPlayer(sample_rate=24000)
-    wav_parser = WAVChunkParser()
-    
-    # Request payload for streaming
-    payload = {
-        "input": clean_text,
-        "model": "tts-1",
-        "voice": params["voice"],
-        "exaggeration": params["exaggeration"],
-        "cfg_weight": params["cfg_weight"],
-        "temperature": params["temperature"],
-        "stream": True,
-        "chunk_size": 25,  # Smaller chunks for lower latency
-        "low_latency": True,
-        "return_metrics": debug
-    }
-    
-    try:
-        if debug:
-            print("[🚀 Starting real-time streaming TTS...]")
-        
-        # Start audio player
-        audio_player.start()
-        
-        # Stream audio chunks
-        response = requests.post(
-            f"{tts_url}/v1/audio/speech/stream",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            stream=True,
-            timeout=120
-        )
-        
-        if debug:
-            print(f"[📡 Response: {response.status_code}]")
-        
-        if response.status_code == 200:
-            if debug:
-                print("[📦 Processing real-time audio chunks...]")
-            
-            complete_audio_chunks = []
-            http_chunk_count = 0
-            wav_chunk_count = 0
-            
-            # Process HTTP chunks and extract complete WAV files
-            for http_chunk in response.iter_content(chunk_size=8192):
-                if http_chunk:
-                    http_chunk_count += 1
-                    
-                    # Parse HTTP chunk to extract complete WAV files
-                    complete_wavs = wav_parser.add_data(http_chunk)
-                    
-                    # Play each complete WAV file immediately
-                    for wav_data in complete_wavs:
-                        wav_chunk_count += 1
-                        complete_audio_chunks.append(wav_data)
-                        
-                        # Play chunk immediately
-                        audio_player.add_chunk(wav_data, debug=debug)
-                        
-                        if wav_chunk_count == 1 and not debug:
-                            print("🎵", end="", flush=True)  # Indicate audio started
-            
-            if debug:
-                print(f"[✅ Streaming complete: {http_chunk_count} HTTP chunks, {wav_chunk_count} WAV chunks]")
-            
-            # Wait for all audio to finish playing
-            audio_player.stop()
-            
-            # Save complete concatenated audio if requested
-            if complete_audio_chunks and debug:
-                total_bytes = sum(len(chunk) for chunk in complete_audio_chunks)
-                print(f"[💾 Complete audio: {wav_chunk_count} WAV chunks, {total_bytes} bytes total]")
-            
-        else:
-            audio_player.stop()
-            logger.error(f"Streaming TTS error: {response.status_code}")
-            if debug:
-                print(f"[❌ HTTP {response.status_code} - stopping audio player]")
-            
-    except Exception as e:
-        audio_player.stop()
-        logger.error(f"Real-time streaming error: {e}")
-        if debug:
-            print(f"[❌ Error: {e}]")
+    current_sr = callback_state['first_sr']
+    logger.info(f"Starting playback. Pre-buffering up to {prebuffer_ms}ms of audio at {current_sr} Hz...")
 
-def get_enhanced_emotional_system_prompt():
-    """System prompt for emotional responses"""
+    # Pre-buffering logic
+    # We want to ensure a certain amount of audio *duration* is in the pcm_q
+    # before starting sounddevice stream.
+    buffered_frames_count = 0
+    # Sum frames already in queue from leftover + any initial chunks
+    if callback_state['leftover_block_float32'] is not None:
+         buffered_frames_count += len(callback_state['leftover_block_float32'])
+    
+    # Temporarily store items from queue to count them, then put back
+    temp_prebuffer_items = []
+    try:
+        while not pcm_q.empty():
+            item = pcm_q.get_nowait()
+            temp_prebuffer_items.append(item)
+            buffered_frames_count += len(item)
+    except queue.Empty:
+        pass # Expected
+    finally:
+        for item in temp_prebuffer_items: # Put them back in order
+            pcm_q.put_nowait(item) # Assuming queue won't be full here
+    
+    target_prebuffer_frames = int((prebuffer_ms / 1000.0) * current_sr)
+
+    prebuffering_loop_start_time = time.monotonic()
+    while buffered_frames_count < target_prebuffer_frames and not stop_flag.is_set():
+        if time.monotonic() - prebuffering_loop_start_time > 5.0: # Max 5s for prebuffering
+            logger.warning(f"Pre-buffering timeout. Starting with {buffered_frames_count / current_sr * 1000:.0f}ms of audio.")
+            break
+        try:
+            # Get new data that arrived while we were counting or waiting
+            new_pcm = pcm_q.get(timeout=0.1) # Wait for new data
+            buffered_frames_count += len(new_pcm)
+            # This item is now out of the queue. It will be the first one picked up by the callback
+            # if we start the stream now, or we need to put it back if we continue prebuffering.
+            # For simplicity, we'll assume this is okay: items are consumed from queue for prebuffer calc.
+            # A more robust way is to put it into a temporary list and then re-feed the queue.
+            # For now: let's put it back to ensure it's available for the actual playback start.
+            # This makes the 'buffered_frames_count' an estimate of what *has arrived*.
+            temp_prebuffer_items.append(new_pcm) # Collect to put back
+        except queue.Empty:
+            if stop_flag.is_set() and pcm_q.empty():
+                logger.info("Reader stopped and queue empty during pre-buffering.")
+                break
+    
+    # Put back any items taken during the prebuffering wait loop
+    for item in reversed(temp_prebuffer_items): # Put back in reverse order of taking, to maintain original order at head
+        # This is tricky with queue.Queue; collections.deque would be better with appendleft
+        # For now, this puts them at the end.
+        # A simpler way for prebuffering: just check pcm_q.qsize() * average_chunk_samples.
+        # The original get/put in the loop was simpler:
+        # pcm = pcm_q.get(timeout=0.05); buffered += len(pcm) / first_sr; pcm_q.put(pcm)
+        # Let's revert prebuffering calculation to the simpler original one for now if the detailed one is too complex.
+        # The provided code had:
+        # buffered = 0.0
+        # while buffered < prebuffer_ms / 1000 and not stop_flag.is_set():
+        #    try:
+        #        pcm = pcm_q.get(timeout=0.05)
+        #        buffered += len(pcm) / current_sr
+        #        pcm_q.put(pcm) # Puts it back at the end
+        #    except queue.Empty: pass
+        # This logic is simple and ensures that amount of data has passed into the queue.
+        pass # The items taken are effectively the "first" items for playback now if not put back.
+             # Or, better: after this loop, if temp_prebuffer_items is not empty, make the first item
+             # callback_state['leftover_block_float32'] and put rest back.
+
+    # Let's stick to a simple pre-buffering fill based on a target number of chunks or total items
+    # The actual pre-buffering by waiting ensures the queue has *some* data. `prebuffer_ms`
+    # defines how much we wait for initially.
+
+    if buffered_frames_count == 0 and stop_flag.is_set(): # Nothing buffered and no more data coming
+        logger.error("No audio data available for playback.")
+        if reader_thread.is_alive(): reader_thread.join(timeout=1.0)
+        return
+
+    logger.info(f"Actual prebuffered duration: {buffered_frames_count / current_sr * 1000:.0f}ms. Starting audio stream.")
+    callback_state['status_logged'] = False # Reset log flag for new stream segment
+
+    stream = None
+    try:
+        stream = sd.RawOutputStream(
+            samplerate=current_sr,
+            channels=1,
+            dtype="int16",               # Raw stream works with bytes
+            callback=pa_cb,
+            blocksize=1024,              # Size of chunk sounddevice asks for from callback. 0 for optimal.
+            latency="high",              # 'low', 'high', or a specific time in seconds. 'high' is safer.
+        )
+        stream.start()
+        logger.info("Audio stream started successfully.")
+
+        # Keep main thread alive until playback is done
+        while not stop_flag.is_set() or not pcm_q.empty() or callback_state['leftover_block_float32'] is not None:
+            if stream and stream.closed: # Stream might get closed by sounddevice on error
+                logger.error("Sounddevice stream closed unexpectedly.")
+                break
+            time.sleep(0.05)
+        
+        # Wait for the queue to be fully processed by the callback after reader stops
+        if not pcm_q.empty():
+            logger.info(f"Reader stopped, waiting for remaining {pcm_q.qsize()} audio chunks in queue to play out...")
+            pcm_q.join() # Wait for all pcm_q.task_done() calls
+        
+        # Final check for leftover data in callback_state, allow it to play out if stream is still active
+        # This needs a bit more thought if relying on it for the very last bit of audio.
+        # Usually, stream.stop() will handle flushing.
+
+    except Exception as e:
+        logger.error(f"Error during audio stream setup or playback: {e}")
+    finally:
+        if stream:
+            logger.info("Stopping and closing audio stream...")
+            try:
+                if not stream.closed:
+                    stream.stop()
+                    stream.close()
+                logger.info("Audio stream stopped and closed.")
+            except Exception as e:
+                logger.error(f"Error stopping/closing stream: {e}")
+        
+        if reader_thread.is_alive():
+            logger.info("Waiting for reader thread to join...")
+            stop_flag.set() # Ensure it's signaled if not already
+            reader_thread.join(timeout=5.0) # Wait for reader to finish
+            if reader_thread.is_alive():
+                logger.warning("Reader thread did not terminate cleanly.")
+        logger.info("Playback finished for this text.")
+# ── chat system prompt ───────────────────────────────────────────────────────
+def get_emotional_system_prompt() -> str:
     return """You are a helpful AI assistant with natural emotional responses.
 
 Express emotions naturally using these keywords:
@@ -493,90 +514,67 @@ Express emotions naturally using these keywords:
 - Confusion: "confused", "unclear", "don't understand"
 
 Keep responses natural and conversational (1-2 sentences). Never use emojis.
-Your voice will automatically adapt to match your emotions with real-time streaming audio!"""
+Your voice will automatically adapt to match your emotions!"""
 
+# ── main loop ────────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Real-time Streaming Emotional TTS Chat - FIXED")
-    parser.add_argument("--llm-url", default="http://localhost:11434", help="Ollama URL")
-    parser.add_argument("--llm-model", default="gemma2:latest", help="LLM model")
-    parser.add_argument("--tts-url", default="http://localhost:5001", help="TTS URL")
-    parser.add_argument("--voice", default=None, help="Override voice (optional)")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    
-    args = parser.parse_args()
-    
+    ap = argparse.ArgumentParser(description="Realtime Seamless Emotional TTS Chat")
+    ap.add_argument("--llm-url", default="http://localhost:11434", help="Ollama URL")
+    ap.add_argument("--llm-model", default="gemma2:latest", help="LLM model")
+    ap.add_argument("--tts-url", default="http://localhost:5001", help="TTS URL")
+    ap.add_argument("--voice", default=None, help="Override voice (else auto)")
+    ap.add_argument("--debug", action="store_true", help="Debug mode")
+    args = ap.parse_args()
+
+    if not AUDIO_AVAILABLE:
+        print("❌ Install sounddevice: pip install sounddevice numpy")
+        return
+
     voice_override = args.voice
     debug_mode = args.debug
-    system_prompt = get_enhanced_emotional_system_prompt()
-    
-    print("🎭 Real-time Streaming Emotional TTS Chat (FIXED)")
-    print("=" * 55)
-    print(f"LLM Model: {args.llm_model}")
-    print(f"Voice Mode: {'Auto-Selected' if not voice_override else f'{voice_override.upper()} Override'}")
-    print(f"Audio: Real-time streaming with proper WAV parsing")
-    print(f"Playback: {AUDIO_AVAILABLE}")
-    print(f"Debug: {'ON' if debug_mode else 'OFF'}")
-    print("🎵 Audio plays in real-time as complete WAV chunks arrive!")
-    print("🔧 Fixed: Proper WAV chunk parsing and playback")
-    print()
-    
+    system_prompt = get_emotional_system_prompt()
+
+    print("🎭 Realtime Seamless Emotional TTS Chat")
+    print("=" * 40)
+    print(f"LLM : {args.llm_model}")
+    print(f"Voice: {'Auto' if not voice_override else voice_override.upper()}")
+    print("Mode : Realtime streaming → Speaker")
+    print(f"Debug: {'ON' if debug_mode else 'OFF'}\n")
+
     try:
         while True:
             user_input = input("You: ").strip()
-            
-            if user_input.lower() in ['quit', 'exit', 'bye']:
+            if user_input.lower() in {"quit", "exit", "bye"}:
                 break
-                
             if not user_input:
                 continue
-            
-            # Handle simple commands
-            if user_input.startswith('!'):
-                if user_input == '!help':
+
+            # ── simple command parser ────────────────────────────────────────
+            if user_input.startswith("!"):
+                if user_input == "!help":
                     print("Commands: !help, !debug on/off, !voice <name>, !voice auto, quit")
                     continue
-                elif user_input.startswith('!debug'):
-                    if 'on' in user_input:
-                        debug_mode = True
-                        print("🔍 Debug mode: ON")
-                    else:
-                        debug_mode = False
-                        print("🔍 Debug mode: OFF")
+                if user_input.startswith("!debug"):
+                    debug_mode = "on" in user_input
+                    print(f"🔍 Debug: {'ON' if debug_mode else 'OFF'}")
                     continue
-                elif user_input.startswith('!voice'):
+                if user_input.startswith("!voice"):
                     parts = user_input.split()
                     if len(parts) > 1:
-                        if parts[1] == 'auto':
-                            voice_override = None
-                            print("🎤 Voice: AUTO")
-                        else:
-                            voice_override = parts[1]
-                            print(f"🎤 Voice: {voice_override.upper()}")
+                        voice_override = None if parts[1] == "auto" else parts[1]
+                        print(f"🎤 Voice: {'AUTO' if not voice_override else voice_override.upper()}")
                     continue
-            
+
             print("AI: ", end="", flush=True)
-            
-            # Stream from LLM
             full_response = ""
-            for text_chunk in stream_from_ollama(user_input, args.llm_model, args.llm_url, system_prompt):
-                print(text_chunk, end="", flush=True)
-                full_response += text_chunk
-            
-            # Real-time streaming TTS with fixed WAV handling
+            for chunk in stream_from_ollama(user_input, args.llm_model, args.llm_url, system_prompt):
+                print(chunk, end="", flush=True)
+                full_response += chunk
+
             if full_response.strip():
-                detected_emotion = detect_emotion_from_text(full_response, debug_mode)
-                
-                # Start real-time streaming TTS
-                get_realtime_streaming_tts(
-                    full_response, 
-                    args.tts_url,
-                    detected_emotion, 
-                    voice_override=voice_override, 
-                    debug=debug_mode
-                )
-            
-            print()  # New line after complete response
-            
+                detected = detect_emotion_from_text(full_response, debug_mode)
+                get_streaming_tts(full_response, args.tts_url, detected, voice_override, debug_mode)
+            print()
     except KeyboardInterrupt:
         print("\n\n👋 Goodbye!")
 

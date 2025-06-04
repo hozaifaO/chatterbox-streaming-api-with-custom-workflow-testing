@@ -50,7 +50,7 @@ class TTSStreamRequest(BaseModel):
     exaggeration: Optional[float] = Field(default=0.5, description="Exaggeration factor (0-1) - higher values make speech more expressive")
     cfg_weight: Optional[float] = Field(default=0.5, description="CFG weight (0-1) - lower values make speech faster, higher values slower")
     temperature: Optional[float] = Field(default=0.8, description="Temperature for sampling (0.1-1.5) - controls randomness")
-    chunk_size: Optional[int] = Field(default=50, description="Chunk size for streaming")
+    chunk_size: Optional[int] = Field(default=50, description="Speech tokens per chunk for streaming")
     # Enhanced streaming parameters
     return_metrics: Optional[bool] = Field(default=False, description="Return streaming metrics")
     low_latency: Optional[bool] = Field(default=False, description="Optimize for low latency (smaller chunks)")
@@ -136,8 +136,46 @@ def validate_emotional_params(exaggeration: float, cfg_weight: float, temperatur
     
     return exaggeration, cfg_weight, temperature
 
+import re  # ADD THIS IMPORT
+
+def smart_text_split(text: str, max_words_per_chunk: int = 100):
+    """
+    Split text into chunks by sentences, keeping under word limit
+    ChatterboxTTS has a practical limit of ~40 seconds (~100-120 words)
+    """
+    if len(text.split()) <= max_words_per_chunk:
+        return [text]
+    
+    # Split by sentences first
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+            
+        # Count words in potential new chunk
+        test_chunk = current_chunk + (" " + sentence if current_chunk else sentence)
+        word_count = len(test_chunk.split())
+        
+        if word_count <= max_words_per_chunk:
+            current_chunk = test_chunk
+        else:
+            # Current chunk is full, save it and start new one
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence
+    
+    # Add the last chunk
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    return chunks if chunks else [text]
+
 def audio_generator(text: str, voice_path: Optional[Path] = None, **kwargs) -> Generator[bytes, None, None]:
-    """Generate audio chunks for streaming with emotional parameters"""
+    """Generate complete audio with smart text chunking to handle unlimited length"""
     if model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
     
@@ -149,35 +187,78 @@ def audio_generator(text: str, voice_path: Optional[Path] = None, **kwargs) -> G
     
     exaggeration, cfg_weight, temperature = validate_emotional_params(exaggeration, cfg_weight, temperature)
     
-    logger.info(f"Streaming with emotional params - exaggeration: {exaggeration}, cfg_weight: {cfg_weight}, temperature: {temperature}")
+    logger.info(f"Generating audio for text: '{text[:100]}{'...' if len(text) > 100 else ''}'")
+    logger.info(f"Text length: {len(text)} chars, {len(text.split())} words")
+    logger.info(f"Parameters - exaggeration: {exaggeration}, cfg_weight: {cfg_weight}, temperature: {temperature}, chunk_size: {chunk_size}")
     
     try:
-        # Generate audio chunks with emotional parameters
-        for audio_chunk, metrics in model.generate_stream(
-            text,
-            audio_prompt_path=str(voice_path) if voice_path else None,
-            exaggeration=exaggeration,
-            cfg_weight=cfg_weight,
-            temperature=temperature,
-            chunk_size=chunk_size,
-            print_metrics=False
-        ):
-            # Convert tensor to bytes
+        # Split text into manageable chunks for ChatterboxTTS
+        text_chunks = smart_text_split(text, max_words_per_chunk=100)
+        logger.info(f"Split into {len(text_chunks)} text chunks")
+        
+        all_audio_chunks = []
+        total_chunks_processed = 0
+        
+        # Process each text chunk
+        for text_idx, text_chunk in enumerate(text_chunks):
+            logger.info(f"Processing text chunk {text_idx + 1}/{len(text_chunks)}: '{text_chunk[:60]}{'...' if len(text_chunk) > 60 else ''}'")
+            logger.info(f"Text chunk {text_idx + 1} has {len(text_chunk.split())} words")
+            
+            # Process this text chunk with generate_stream
+            chunk_audio_parts = []
+            
+            for audio_chunk, metrics in model.generate_stream(
+                text_chunk,
+                audio_prompt_path=str(voice_path) if voice_path else None,
+                exaggeration=exaggeration,
+                cfg_weight=cfg_weight,
+                temperature=temperature,
+                chunk_size=chunk_size,
+                print_metrics=False
+            ):
+                total_chunks_processed += 1
+                chunk_audio_parts.append(audio_chunk)
+                
+                # Log chunk info
+                chunk_duration = audio_chunk.shape[-1] / model.sr
+                logger.debug(f"Received audio chunk {total_chunks_processed}, shape: {audio_chunk.shape}, duration: {chunk_duration:.3f}s")
+                
+                # Log metrics if available
+                if metrics:
+                    if hasattr(metrics, 'rtf') and metrics.rtf:
+                        logger.debug(f"Audio chunk {total_chunks_processed}, RTF: {metrics.rtf:.3f}")
+                    if hasattr(metrics, 'latency_to_first_chunk') and metrics.latency_to_first_chunk and total_chunks_processed == 1:
+                        logger.info(f"First chunk latency: {metrics.latency_to_first_chunk:.3f}s")
+            
+            # Concatenate audio parts for this text chunk
+            if chunk_audio_parts:
+                text_chunk_audio = torch.cat(chunk_audio_parts, dim=-1)
+                all_audio_chunks.append(text_chunk_audio)
+                text_chunk_duration = text_chunk_audio.shape[-1] / model.sr
+                logger.info(f"Text chunk {text_idx + 1} complete: {len(chunk_audio_parts)} audio chunks, {text_chunk_duration:.3f}s duration")
+            
+        # Concatenate ALL audio chunks from ALL text chunks
+        if all_audio_chunks:
+            final_audio = torch.cat(all_audio_chunks, dim=-1)
+            final_duration = final_audio.shape[-1] / model.sr
+            logger.info(f"FINAL AUDIO: {len(text_chunks)} text chunks, {total_chunks_processed} audio chunks total")
+            logger.info(f"Final audio shape: {final_audio.shape}, duration: {final_duration:.3f}s")
+            
+            # Convert to bytes and yield as single complete WAV file
             buffer = io.BytesIO()
-            torchaudio.save(buffer, audio_chunk, model.sr, format="wav")
+            torchaudio.save(buffer, final_audio, model.sr, format="wav")
             buffer.seek(0)
             yield buffer.read()
-            
-            # Log metrics if available
-            if metrics and hasattr(metrics, 'rtf') and metrics.rtf:
-                logger.debug(f"Chunk {getattr(metrics, 'chunk_count', '?')}, RTF: {metrics.rtf:.3f}")
-                
+        else:
+            logger.error("No audio chunks were generated!")
+            raise HTTPException(status_code=500, detail="No audio generated")
+                    
     except Exception as e:
         logger.error(f"Error generating audio: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 def audio_generator_enhanced(text: str, voice_path: Optional[Path] = None, **kwargs) -> Generator[bytes, None, None]:
-    """Enhanced audio generator with full streaming metrics and options"""
+    """Enhanced audio generator with smart text chunking to handle unlimited length"""
     if model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
     
@@ -192,7 +273,7 @@ def audio_generator_enhanced(text: str, voice_path: Optional[Path] = None, **kwa
     
     # Optimize chunk size for low latency
     if low_latency:
-        chunk_size = min(25, chunk_size)  # Smaller chunks for lower latency
+        chunk_size = min(25, chunk_size)  # Smaller speech token chunks for lower latency
     
     # Validate and clamp parameters
     exaggeration = max(0.0, min(1.0, exaggeration))
@@ -204,35 +285,71 @@ def audio_generator_enhanced(text: str, voice_path: Optional[Path] = None, **kwa
     if custom_voice_path:
         voice_path = Path(custom_voice_path) if Path(custom_voice_path).exists() else voice_path
     
-    logger.info(f"Enhanced streaming with params - exaggeration: {exaggeration}, cfg_weight: {cfg_weight}, temperature: {temperature}, chunk_size: {chunk_size}")
+    logger.info(f"Enhanced generation for text: '{text[:100]}{'...' if len(text) > 100 else ''}'")
+    logger.info(f"Enhanced text length: {len(text)} chars, {len(text.split())} words")
+    logger.info(f"Enhanced parameters - exaggeration: {exaggeration}, cfg_weight: {cfg_weight}, temperature: {temperature}, chunk_size: {chunk_size}")
     
     try:
-        # Use ChatterboxTTS streaming with full parameter support
-        for audio_chunk, metrics in model.generate_stream(
-            text,
-            audio_prompt_path=str(voice_path) if voice_path else None,
-            exaggeration=exaggeration,
-            cfg_weight=cfg_weight,
-            temperature=temperature,
-            chunk_size=chunk_size
-        ):
-            # Convert tensor to WAV bytes
-            buffer = io.BytesIO()
-            torchaudio.save(buffer, audio_chunk, model.sr, format="wav")
-            buffer.seek(0)
-            chunk_data = buffer.read()
+        # Split text into manageable chunks for ChatterboxTTS
+        text_chunks = smart_text_split(text, max_words_per_chunk=80 if low_latency else 100)
+        logger.info(f"Enhanced: Split into {len(text_chunks)} text chunks")
+        
+        all_audio_chunks = []
+        total_chunks_processed = 0
+        
+        # Process each text chunk
+        for text_idx, text_chunk in enumerate(text_chunks):
+            logger.info(f"Enhanced processing text chunk {text_idx + 1}/{len(text_chunks)}: '{text_chunk[:60]}{'...' if len(text_chunk) > 60 else ''}'")
             
-            yield chunk_data
+            # Process this text chunk with generate_stream
+            chunk_audio_parts = []
             
-            # Log metrics if available
-            if metrics:
-                if hasattr(metrics, 'rtf') and metrics.rtf:
-                    logger.debug(f"Chunk {getattr(metrics, 'chunk_count', '?')}, RTF: {metrics.rtf:.3f}")
-                if hasattr(metrics, 'latency_to_first_chunk') and metrics.latency_to_first_chunk:
-                    logger.info(f"First chunk latency: {metrics.latency_to_first_chunk:.3f}s")
+            for audio_chunk, metrics in model.generate_stream(
+                text_chunk,
+                audio_prompt_path=str(voice_path) if voice_path else None,
+                exaggeration=exaggeration,
+                cfg_weight=cfg_weight,
+                temperature=temperature,
+                chunk_size=chunk_size
+            ):
+                total_chunks_processed += 1
+                chunk_audio_parts.append(audio_chunk)
+                
+                chunk_duration = audio_chunk.shape[-1] / model.sr
+                logger.debug(f"Enhanced received audio chunk {total_chunks_processed}, shape: {audio_chunk.shape}, duration: {chunk_duration:.3f}s")
+                
+                # Enhanced metrics logging
+                if metrics:
+                    if hasattr(metrics, 'rtf') and metrics.rtf:
+                        logger.debug(f"Enhanced audio chunk {total_chunks_processed}, RTF: {metrics.rtf:.3f}")
+                    if hasattr(metrics, 'latency_to_first_chunk') and metrics.latency_to_first_chunk and total_chunks_processed == 1:
+                        logger.info(f"Enhanced first chunk latency: {metrics.latency_to_first_chunk:.3f}s")
+            
+            # Concatenate audio parts for this text chunk
+            if chunk_audio_parts:
+                text_chunk_audio = torch.cat(chunk_audio_parts, dim=-1)
+                all_audio_chunks.append(text_chunk_audio)
+                text_chunk_duration = text_chunk_audio.shape[-1] / model.sr
+                logger.info(f"Enhanced text chunk {text_idx + 1} complete: {len(chunk_audio_parts)} audio chunks, {text_chunk_duration:.3f}s duration")
                     
+        # Concatenate ALL audio chunks from ALL text chunks
+        if all_audio_chunks:
+            final_audio = torch.cat(all_audio_chunks, dim=-1)
+            final_duration = final_audio.shape[-1] / model.sr
+            logger.info(f"Enhanced FINAL AUDIO: {len(text_chunks)} text chunks, {total_chunks_processed} audio chunks total")
+            logger.info(f"Enhanced final audio shape: {final_audio.shape}, duration: {final_duration:.3f}s")
+            
+            # Convert to bytes and yield as single complete WAV file
+            buffer = io.BytesIO()
+            torchaudio.save(buffer, final_audio, model.sr, format="wav")
+            buffer.seek(0)
+            yield buffer.read()
+        else:
+            logger.error("Enhanced: No audio chunks were generated!")
+            raise HTTPException(status_code=500, detail="No audio generated")
+                        
     except Exception as e:
-        logger.error(f"Error in enhanced streaming: {e}")
+        logger.error(f"Error in enhanced generation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.on_event("startup")
@@ -269,7 +386,9 @@ async def root():
             "streaming": True,
             "enhanced_streaming": True,
             "voice_upload": True,
-            "openai_compatible": True
+            "openai_compatible": True,
+            "chatterbox_streaming": True,
+            "complete_audio_generation": True
         }
     }
 
@@ -299,17 +418,41 @@ async def create_speech(request: TTSRequest):
     )
     
     try:
-        # Generate complete audio with emotional parameters
+        # Generate complete audio with emotional parameters and smart chunking
         logger.info(f"Generating audio for text: {request.input[:50]}...")
+        logger.info(f"Text length: {len(request.input)} chars, {len(request.input.split())} words")
         logger.info(f"Emotional params - exaggeration: {exaggeration}, cfg_weight: {cfg_weight}, temperature: {temperature}")
         
-        wav = model.generate(
-            request.input,
-            audio_prompt_path=str(voice_path) if voice_path else None,
-            exaggeration=exaggeration,
-            cfg_weight=cfg_weight,
-            temperature=temperature
-        )
+        # Check if we need to use chunking for long text
+        if len(request.input.split()) > 100:
+            logger.info("Using smart text chunking for long text")
+            text_chunks = smart_text_split(request.input, max_words_per_chunk=100)
+            all_audio_chunks = []
+            
+            for chunk_idx, text_chunk in enumerate(text_chunks):
+                logger.info(f"Generating chunk {chunk_idx + 1}/{len(text_chunks)}")
+                wav_chunk = model.generate(
+                    text_chunk,
+                    audio_prompt_path=str(voice_path) if voice_path else None,
+                    exaggeration=exaggeration,
+                    cfg_weight=cfg_weight,
+                    temperature=temperature
+                )
+                all_audio_chunks.append(wav_chunk)
+            
+            # Concatenate all chunks
+            final_wav = torch.cat(all_audio_chunks, dim=-1)
+            logger.info(f"Non-streaming: Combined {len(text_chunks)} chunks, final duration: {final_wav.shape[-1] / model.sr:.3f}s")
+        else:
+            # Short text, use single generation
+            text_chunks = [request.input]  # For header consistency
+            final_wav = model.generate(
+                request.input,
+                audio_prompt_path=str(voice_path) if voice_path else None,
+                exaggeration=exaggeration,
+                cfg_weight=cfg_weight,
+                temperature=temperature
+            )
         
         # Convert to bytes
         buffer = io.BytesIO()
@@ -318,7 +461,7 @@ async def create_speech(request: TTSRequest):
             # Save as WAV first, then convert to MP3
             # Note: This requires ffmpeg to be installed
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
-                torchaudio.save(tmp_wav.name, wav, model.sr)
+                torchaudio.save(tmp_wav.name, final_wav, model.sr)
                 tmp_wav_path = tmp_wav.name
             
             # Convert to MP3 using subprocess + ffmpeg
@@ -340,11 +483,11 @@ async def create_speech(request: TTSRequest):
             except Exception as e:
                 logger.warning(f"MP3 conversion failed: {e}, falling back to WAV")
                 buffer = io.BytesIO()
-                torchaudio.save(buffer, wav, model.sr, format="wav")
+                torchaudio.save(buffer, final_wav, model.sr, format="wav")
                 media_type = "audio/wav"
         else:
             # Save as WAV
-            torchaudio.save(buffer, wav, model.sr, format="wav")
+            torchaudio.save(buffer, final_wav, model.sr, format="wav")
             media_type = "audio/wav"
         
         buffer.seek(0)
@@ -356,7 +499,10 @@ async def create_speech(request: TTSRequest):
                 "Content-Disposition": f"attachment; filename=speech.{request.response_format}",
                 "X-Chatterbox-Exaggeration": str(exaggeration),
                 "X-Chatterbox-CFG-Weight": str(cfg_weight),
-                "X-Chatterbox-Temperature": str(temperature)
+                "X-Chatterbox-Temperature": str(temperature),
+                "X-Chatterbox-Text-Chunks": str(len(text_chunks)),
+                "X-Chatterbox-Words": str(len(request.input.split())),
+                "X-Chatterbox-Chunking-Used": str(len(text_chunks) > 1)
             }
         )
         
@@ -423,13 +569,14 @@ async def create_speech_stream(request: TTSStreamRequest):
             headers={
                 "Content-Disposition": "attachment; filename=speech.wav",
                 "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
                 "X-Chatterbox-Exaggeration": str(exaggeration),
                 "X-Chatterbox-CFG-Weight": str(cfg_weight),
                 "X-Chatterbox-Temperature": str(temperature),
                 "X-Chatterbox-Chunk-Size": str(chunk_size),
                 "X-Chatterbox-Low-Latency": str(request.low_latency),
-                "X-Chatterbox-Metrics": str(request.return_metrics)
+                "X-Chatterbox-Metrics": str(request.return_metrics),
+                "X-Chatterbox-Generation-Method": "smart-text-chunking",
+                "X-Chatterbox-Words": str(len(request.input.split()))
             }
         )
         
@@ -591,6 +738,13 @@ async def get_streaming_info():
         "chunk_size_range": [10, 200],
         "default_chunk_size": 50,
         "low_latency_chunk_size": 25,
+        "generation_method": "smart_text_chunking_with_streaming",
+        "text_chunking": {
+            "enabled": True,
+            "max_words_per_chunk": 100,
+            "method": "sentence_boundary_splitting",
+            "reason": "ChatterboxTTS has ~40 second limit per generate_stream call"
+        },
         "supported_parameters": [
             "exaggeration", "cfg_weight", "temperature", "chunk_size"
         ],
@@ -638,6 +792,9 @@ async def test_streaming_performance(
     first_chunk_time = None
     
     try:
+        # Test using the same method as the generators - collect all chunks
+        streamed_chunks = []
+        
         for audio_chunk, metrics in model.generate_stream(
             text,
             audio_prompt_path=str(voice_path) if voice_path else None,
@@ -647,6 +804,8 @@ async def test_streaming_performance(
             chunk_size=chunk_size
         ):
             chunk_count += 1
+            streamed_chunks.append(audio_chunk)
+            
             if first_chunk_time is None:
                 first_chunk_time = time.time() - start_time
             
@@ -660,6 +819,7 @@ async def test_streaming_performance(
         return {
             "test_results": {
                 "text_length": len(text),
+                "chunks_collected": len(streamed_chunks),
                 "chunk_count": chunk_count,
                 "total_generation_time": round(total_time, 3),
                 "first_chunk_latency": round(first_chunk_time, 3) if first_chunk_time else None,

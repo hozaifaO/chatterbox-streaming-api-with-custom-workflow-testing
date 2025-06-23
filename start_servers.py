@@ -32,7 +32,7 @@ def start_physics_server():
         "--tts-url", "http://localhost:5001",
         "--azure-endpoint", "https://aiiieou.services.ai.azure.com/models",
         "--azure-model", "DeepSeek-V3-0324",
-        "--azure-api-key", "3D8J84afqQ4QYZTyx6ZzWKpit4REpMScPE2ofUfDjKNxwsIlBcqRJQQJ99BFACYeBjFXJ3w3AAAAACOG7oIT"  # Your API key
+        "--azure-api-key", ""  # Your API key
     ])
 
 def main():

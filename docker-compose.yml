@@ -1,9 +1,13 @@
 version: '3.8'
 services:
-  chatterbox-tts:
-    build: .
+  # Combined TTS + Physics Book Server
+  chatterbox-combined:
+    build: 
+      context: .
+      dockerfile: Dockerfile.voices
     ports:
-      - "5001:5001"
+      - "5001:5001"  # TTS server
+      - "5000:5000"  # Physics book server
     volumes:
       - "./voices:/app/voices:ro"
     environment:
@@ -17,3 +21,17 @@ services:
               count: 1
               capabilities: [gpu]
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Access host's Ollama
+
+  # Ollama LLM service (separate container)
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:

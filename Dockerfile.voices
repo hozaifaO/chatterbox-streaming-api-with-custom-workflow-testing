@@ -1,4 +1,4 @@
-# Dockerfile with full voice support
+# Dockerfile with TTS + Physics Book Server combined
 FROM python:3.10-slim
 
 # Install system dependencies including text-to-speech for voice generation
@@ -24,20 +24,22 @@ WORKDIR /app
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies
+# Install Python dependencies (add Flask for physics server)
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cu118
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir git+https://github.com/davidbrowne17/chatterbox-streaming.git
+RUN pip install --no-cache-dir flask flask-cors
 
-# Copy the server script
+# Copy both server scripts
 COPY server.py .
+COPY physics_book_server.py .
+COPY start_servers.py .
 
 # Create directories for voices and cache
 RUN mkdir -p /app/voices /app/.cache
 
 # Generate sample voice files using espeak (as placeholders)
-# These will be used if no custom voices are provided
 RUN echo "Generating sample voice files..." && \
     espeak -s 150 -v en+m1 "Hello, I am Alloy, a professional and neutral voice assistant." -w /app/voices/alloy.wav && \
     espeak -s 160 -v en+m2 "Hello, I am Echo, with a clear and articulate speaking style." -w /app/voices/echo.wav && \
@@ -45,10 +47,6 @@ RUN echo "Generating sample voice files..." && \
     espeak -s 130 -v en+m3 "Hello, I am Onyx, speaking with a deep and authoritative tone." -w /app/voices/onyx.wav && \
     espeak -s 170 -v en+f2 "Hello, I am Nova, bringing bright and energetic conversation." -w /app/voices/nova.wav && \
     espeak -s 135 -v en+f3 "Hello, I am Shimmer, with a soft and gentle speaking voice." -w /app/voices/shimmer.wav
-
-# Optional: Copy custom voice files if they exist
-# Uncomment the next line if you have a voices/ directory with custom .wav files
-# COPY voices/ /app/voices/
 
 # Set proper permissions
 RUN chown -R app:app /app
@@ -63,12 +61,12 @@ ENV HF_HOME=/app/.cache
 ENV TRANSFORMERS_CACHE=/app/.cache
 ENV HF_DATASETS_CACHE=/app/.cache
 
-# Expose the port
-EXPOSE 5001
+# Expose both ports
+EXPOSE 5001 5000
 
-# Health check
+# Health check for both services
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:5001/health || exit 1
+    CMD curl -f http://localhost:5001/health && curl -f http://localhost:5000/health || exit 1
 
-# Default command with all voices enabled
-CMD ["python", "server.py", "/app/voices", "alloy,echo,fable,onyx,nova,shimmer", "--host", "0.0.0.0", "--port", "5001", "--device", "cuda"]
+# Start both servers
+CMD ["python", "start_servers.py"]

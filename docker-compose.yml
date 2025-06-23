@@ -1,6 +1,5 @@
-version: '3.8'
 services:
-  # Combined TTS + Physics Book Server
+  # Combined TTS + Physics Book Server (now with Azure DeepSeek-V3)
   chatterbox-combined:
     build: 
       context: .
@@ -10,6 +9,7 @@ services:
       - "5000:5000"  # Physics book server
     volumes:
       - "./voices:/app/voices:ro"
+      - "./audio_outputs:/app/audio_outputs"  # Mount audio outputs for easy access
     environment:
       - PYTHONUNBUFFERED=1
       - NVIDIA_VISIBLE_DEVICES=all
@@ -21,17 +21,9 @@ services:
               count: 1
               capabilities: [gpu]
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"  # Access host's Ollama
-
-  # Ollama LLM service (separate container)
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-
-volumes:
-  ollama_data:
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health", "&&", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

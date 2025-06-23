@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Start both TTS server and Physics Book server in the same container
+Updated for Azure DeepSeek-V3
 """
 import subprocess
 import sys
@@ -20,7 +21,7 @@ def start_tts_server():
     ])
 
 def start_physics_server():
-    """Start the Physics Book server"""
+    """Start the Physics Book server with Azure DeepSeek-V3"""
     print("🔬 Starting Physics Book Server on port 5000...")
     # Wait a moment for TTS server to initialize
     time.sleep(5)
@@ -29,7 +30,9 @@ def start_physics_server():
         "--host", "0.0.0.0",
         "--port", "5000",
         "--tts-url", "http://localhost:5001",
-        "--ollama-url", "http://host.docker.internal:11434"  # Access host's Ollama
+        "--azure-endpoint", "https://aiiieou.services.ai.azure.com/models",
+        "--azure-model", "DeepSeek-V3-0324",
+        "--azure-api-key", "3D8J84afqQ4QYZTyx6ZzWKpit4REpMScPE2ofUfDjKNxwsIlBcqRJQQJ99BFACYeBjFXJ3w3AAAAACOG7oIT"  # Your API key
     ])
 
 def main():

@@ -269,16 +269,20 @@
             });
         });
 
-        // Explain button - FIXED FOR COMPLETE AUDIO
+        // UPDATED: Explain button with longer timeout and better error handling
         document.getElementById('explainBtn').addEventListener('click', async function() {
             if (!selectedSection || isPlaying) return;
             
             const sectionText = selectedSection.innerText;
             const sectionNumber = selectedSection.dataset.section;
             
-            updateButton('🎤 Generating...', true);
-            showStatus('Processing physics explanation...');
+            updateButton('🤖 Generating explanation...', true);
+            showStatus('Processing with Azure DeepSeek-V3...');
             
+            // Create AbortController for manual timeout control
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes timeout
+
             try {
                 const response = await fetch('http://localhost:5000/explain', {
                     method: 'POST',
@@ -288,14 +292,20 @@
                     body: JSON.stringify({
                         text: sectionText,
                         section: sectionNumber
-                    })
+                    }),
+                    signal: controller.signal // Add abort signal
                 });
                 
+                clearTimeout(timeoutId); // Clear timeout if request completes
+                
                 if (!response.ok) {
-                    throw new Error(`Server error: ${response.status}`);
+                    throw new Error(`Server error: ${response.status} - ${response.statusText}`);
                 }
                 
-                // Get complete audio file (not streaming)
+                updateButton('🎵 Generating audio...', true);
+                showStatus('🎤 Converting to speech...');
+                
+                // Get complete audio file
                 const audioData = await response.arrayBuffer();
                 
                 showStatus('🔊 Playing audio...');
@@ -324,8 +334,17 @@
                 await currentAudio.play();
                 
             } catch (error) {
+                clearTimeout(timeoutId); // Clear timeout on error
                 console.error('Error:', error);
-                showStatus(`❌ Error: ${error.message}`, true);
+                
+                let errorMessage = error.message;
+                if (error.name === 'AbortError') {
+                    errorMessage = 'Request timed out (5 minutes). Try a shorter section.';
+                } else if (error.message.includes('Failed to fetch')) {
+                    errorMessage = 'Cannot connect to server. Is it running?';
+                }
+                
+                showStatus(`❌ Error: ${errorMessage}`, true);
                 updateButton(`🎤 Explain Section ${selectedSection.dataset.section}`, false);
                 isPlaying = false;
             }
@@ -351,7 +370,7 @@
         function hideStatus() {
             setTimeout(() => {
                 document.getElementById('status').classList.remove('show');
-            }, 2000);
+            }, 3000); // Longer display time
         }
 
         // Stop audio if page is unloaded
@@ -362,7 +381,7 @@
             }
         });
 
-        // Stop button functionality (optional - can be added later)
+        // ESC key to stop audio
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape' && currentAudio && isPlaying) {
                 currentAudio.pause();

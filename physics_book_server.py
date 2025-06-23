@@ -2,7 +2,7 @@
 """
 Physics Book TTS Web Server
 Handles requests from the HTML physics book reader frontend
-Integrates with Ollama (Gemma3) and TTS services
+Integrates with Azure DeepSeek-V3 and TTS services
 """
 
 import json
@@ -15,6 +15,9 @@ from flask import Flask, request, Response, jsonify, send_file
 from flask_cors import CORS
 
 import requests
+from azure.ai.inference import ChatCompletionsClient
+from azure.ai.inference.models import SystemMessage, UserMessage
+from azure.core.credentials import AzureKeyCredential
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -24,9 +27,10 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend
 
-# Global variables for configuration
-OLLAMA_URL = "http://host.docker.internal:11434"
-OLLAMA_MODEL = "gemma3:latest"
+# Global variables for configuration - UPDATED FOR AZURE
+AZURE_ENDPOINT = "https://aiiieou.services.ai.azure.com/models"
+AZURE_MODEL = "DeepSeek-V3-0324"
+AZURE_API_KEY = ""  # Replace with your actual API key
 TTS_URL = "http://localhost:5001"
 TTS_VOICE = "alloy"
 
@@ -61,47 +65,55 @@ def clean_text_for_tts(text: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def get_complete_ollama_response(prompt: str, model: str, base_url: str, system_prompt: Optional[str] = None) -> Optional[str]:
-    """Get complete response from Ollama (NO STREAMING)"""
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,  # NO STREAMING
-        "options": {
-            "temperature": 0.7,
-            "top_p": 0.9
-        }
-    }
+def get_complete_azure_response(prompt: str, system_prompt: Optional[str] = None) -> Optional[str]:
+    """Get complete response from Azure DeepSeek-V3 (NO STREAMING)"""
     
-    if system_prompt:
-        payload["system"] = system_prompt
-    
-    logger.info(f"🤖 Sending request to Ollama: {base_url}/api/generate")
-    logger.info(f"🤖 Model: {model}")
+    logger.info(f"🤖 Sending request to Azure DeepSeek-V3: {AZURE_ENDPOINT}")
+    logger.info(f"🤖 Model: {AZURE_MODEL}")
     logger.info(f"🤖 Prompt length: {len(prompt)} characters")
     
     try:
-        response = requests.post(
-            f"{base_url}/api/generate",
-            json=payload,
-            timeout=120  # Longer timeout for complete response
+        # Initialize Azure client
+        client = ChatCompletionsClient(
+            endpoint=AZURE_ENDPOINT,
+            credential=AzureKeyCredential(AZURE_API_KEY),
+            api_version="2024-05-01-preview"
         )
         
-        if response.status_code != 200:
-            logger.error(f"❌ Ollama API error: {response.status_code}")
-            logger.error(f"❌ Response: {response.text}")
-            return None
+        # Prepare messages
+        messages = []
+        if system_prompt:
+            messages.append(SystemMessage(content=system_prompt))
+        messages.append(UserMessage(content=prompt))
+        
+        # Get complete response (NO STREAMING)
+        response = client.complete(
+            stream=False,  # NO STREAMING
+            messages=messages,
+            max_tokens=2048,
+            temperature=0.7,
+            top_p=0.9,
+            presence_penalty=0.0,
+            frequency_penalty=0.0,
+            model=AZURE_MODEL
+        )
+        
+        # Extract response text
+        if response.choices and len(response.choices) > 0:
+            llm_response = response.choices[0].message.content
             
-        data = response.json()
-        llm_response = data.get('response', '')
-        
-        logger.info(f"✅ Ollama response received!")
-        logger.info(f"📝 LLM Response length: {len(llm_response)} characters")
-        logger.info(f"📝 LLM Response: {llm_response}")
-        
-        return llm_response                    
+            logger.info(f"✅ Azure DeepSeek-V3 response received!")
+            logger.info(f"📝 LLM Response length: {len(llm_response)} characters")
+            logger.info(f"📝 LLM Response: {llm_response}")
+            
+            client.close()
+            return llm_response
+        else:
+            logger.error("❌ No choices in Azure response")
+            client.close()
+            return None                    
     except Exception as e:
-        logger.error(f"❌ Error getting response from Ollama: {e}")
+        logger.error(f"❌ Error getting response from Azure DeepSeek-V3: {e}")
         return None
 
 def get_complete_tts_audio(text: str, voice: str, tts_url: str) -> Optional[bytes]:
@@ -127,7 +139,7 @@ def get_complete_tts_audio(text: str, voice: str, tts_url: str) -> Optional[byte
             f"{tts_url}/v1/audio/speech",
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=60
+            timeout=300  # INCREASED TIMEOUT TO 5 MINUTES
         )
         
         if response.status_code == 200:
@@ -182,17 +194,12 @@ def explain_section():
         Think of this as creating a mini physics lesson that someone could listen to while walking or driving.
         Make the physics come alive through your explanation!"""
         
-        # Get complete response from LLM
-        logger.info("🚀 Starting LLM processing...")
-        llm_response = get_complete_ollama_response(
-            section_text, 
-            OLLAMA_MODEL, 
-            OLLAMA_URL, 
-            system_prompt
-        )
+        # Get complete response from Azure DeepSeek-V3
+        logger.info("🚀 Starting Azure DeepSeek-V3 processing...")
+        llm_response = get_complete_azure_response(section_text, system_prompt)
         
         if not llm_response:
-            return jsonify({'error': 'Failed to get explanation from LLM'}), 500
+            return jsonify({'error': 'Failed to get explanation from Azure DeepSeek-V3'}), 500
         
         # Generate complete audio
         logger.info("🚀 Starting TTS processing...")
@@ -235,28 +242,30 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'service': 'physics_book_server',
-        'ollama_url': OLLAMA_URL,
+        'azure_endpoint': AZURE_ENDPOINT,
+        'azure_model': AZURE_MODEL,
         'tts_url': TTS_URL,
         'audio_dir': AUDIO_DIR
     })
 
 @app.route('/test-services', methods=['GET'])
 def test_services():
-    """Test connectivity to Ollama and TTS services"""
+    """Test connectivity to Azure and TTS services"""
     results = {}
     
-    # Test Ollama
+    # Test Azure DeepSeek-V3
     try:
-        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
-        results['ollama'] = {
-            'status': 'connected' if response.status_code == 200 else 'error',
-            'url': OLLAMA_URL,
-            'status_code': response.status_code
+        test_response = get_complete_azure_response("Hello, this is a test.", "You are a helpful assistant.")
+        results['azure'] = {
+            'status': 'connected' if test_response else 'error',
+            'endpoint': AZURE_ENDPOINT,
+            'model': AZURE_MODEL,
+            'test_response_length': len(test_response) if test_response else 0
         }
     except Exception as e:
-        results['ollama'] = {
+        results['azure'] = {
             'status': 'error',
-            'url': OLLAMA_URL,
+            'endpoint': AZURE_ENDPOINT,
             'error': str(e)
         }
     
@@ -278,9 +287,10 @@ def test_services():
     return jsonify(results)
 
 def main():
-    parser = argparse.ArgumentParser(description="Physics Book TTS Web Server")
-    parser.add_argument("--ollama-url", default="http://host.docker.internal:11434", help="Ollama URL")
-    parser.add_argument("--ollama-model", default="gemma3:latest", help="Ollama model")
+    parser = argparse.ArgumentParser(description="Physics Book TTS Web Server with Azure DeepSeek-V3")
+    parser.add_argument("--azure-endpoint", default="https://aiiieou.services.ai.azure.com/models", help="Azure endpoint")
+    parser.add_argument("--azure-model", default="DeepSeek-V3-0324", help="Azure model")
+    parser.add_argument("--azure-api-key", default="<YOUR_API_KEY_HERE>", help="Azure API key")
     parser.add_argument("--tts-url", default="http://localhost:5001", help="TTS URL")
     parser.add_argument("--voice", default="alloy", help="TTS voice")
     parser.add_argument("--host", default="0.0.0.0", help="Web server host")
@@ -294,17 +304,18 @@ def main():
         app.debug = True
     
     # Set global configuration
-    global OLLAMA_URL, OLLAMA_MODEL, TTS_URL, TTS_VOICE
-    OLLAMA_URL = args.ollama_url
-    OLLAMA_MODEL = args.ollama_model
+    global AZURE_ENDPOINT, AZURE_MODEL, AZURE_API_KEY, TTS_URL, TTS_VOICE
+    AZURE_ENDPOINT = args.azure_endpoint
+    AZURE_MODEL = args.azure_model
+    AZURE_API_KEY = args.azure_api_key
     TTS_URL = args.tts_url
     TTS_VOICE = args.voice
     
-    print("🔬 Physics Book TTS Web Server")
-    print("=" * 40)
+    print("🔬 Physics Book TTS Web Server with Azure DeepSeek-V3")
+    print("=" * 55)
     print(f"Server running on: http://{args.host}:{args.port}")
-    print(f"Ollama URL: {OLLAMA_URL}")
-    print(f"Ollama Model: {OLLAMA_MODEL}")
+    print(f"Azure Endpoint: {AZURE_ENDPOINT}")
+    print(f"Azure Model: {AZURE_MODEL}")
     print(f"TTS URL: {TTS_URL}")
     print(f"TTS Voice: {TTS_VOICE}")
     print(f"Audio files saved to: {AUDIO_DIR}")
@@ -312,7 +323,7 @@ def main():
     print("Endpoints:")
     print(f"  POST /explain - Process physics section explanations")
     print(f"  GET  /health - Health check")
-    print(f"  GET  /test-services - Test Ollama and TTS connectivity")
+    print(f"  GET  /test-services - Test Azure and TTS connectivity")
     print()
     print("Open your physics_book_reader.html file in a browser")
     print("Press Ctrl+C to stop the server")

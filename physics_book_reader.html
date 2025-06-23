@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Physics Chapter 1: Classical Mechanics</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Georgia', serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .book-container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .book-header {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .book-header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            font-weight: 300;
+        }
+
+        .book-header .subtitle {
+            font-size: 1.2em;
+            opacity: 0.8;
+        }
+
+        .book-content {
+            padding: 40px;
+        }
+
+        .section {
+            margin-bottom: 40px;
+            padding: 25px;
+            border-radius: 10px;
+            background: #f8f9fa;
+            border-left: 5px solid #667eea;
+            position: relative;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .section:hover {
+            background: #e9ecef;
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+        }
+
+        .section.selected {
+            background: #e3f2fd;
+            border-left-color: #2196f3;
+            box-shadow: 0 5px 20px rgba(33, 150, 243, 0.2);
+        }
+
+        .section h2 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+            font-size: 1.5em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-number {
+            background: #667eea;
+            color: white;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: bold;
+        }
+
+        .section p {
+            margin-bottom: 15px;
+            text-align: justify;
+            font-size: 1.1em;
+        }
+
+        .equation {
+            background: #fff;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 8px;
+            border: 2px solid #e0e0e0;
+            text-align: center;
+            font-family: 'Courier New', monospace;
+            font-size: 1.2em;
+            color: #d32f2f;
+        }
+
+        .controls {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            z-index: 1000;
+        }
+
+        .explain-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 50px;
+            font-size: 1.1em;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .explain-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 15px 40px rgba(102, 126, 234, 0.4);
+        }
+
+        .explain-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 25px;
+            font-size: 0.9em;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .status.show {
+            opacity: 1;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        .status.error {
+            background: rgba(244, 67, 54, 0.9);
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .selection-prompt {
+            text-align: center;
+            color: #666;
+            font-style: italic;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #fff3cd;
+            border-radius: 8px;
+            border: 1px solid #ffeaa7;
+        }
+    </style>
+</head>
+<body>
+    <div class="book-container">
+        <div class="book-header">
+            <h1>Classical Mechanics</h1>
+            <div class="subtitle">Chapter 1: Fundamentals of Motion</div>
+        </div>
+        
+        <div class="book-content">
+            <div class="selection-prompt">
+                Click on any section below to select it, then press "Explain" to hear an audio explanation
+            </div>
+            
+            <div class="section" data-section="1.1">
+                <h2><span class="section-number">1.1</span>Newton's First Law of Motion</h2>
+                <p>Newton's First Law, also known as the Law of Inertia, states that an object at rest stays at rest and an object in motion stays in motion with the same speed and in the same direction unless acted upon by an unbalanced force.</p>
+                <p>This fundamental principle revolutionized our understanding of motion. Before Newton, it was commonly believed that objects naturally came to rest. However, Newton realized that it is the presence of forces, such as friction and air resistance, that cause moving objects to slow down and eventually stop.</p>
+                <p>Inertia is the tendency of an object to resist changes in its state of motion. The more massive an object is, the greater its inertia, and the more force is required to change its motion.</p>
+                <div class="equation">F = 0 → a = 0 → v = constant</div>
+            </div>
+
+            <div class="section" data-section="1.2">
+                <h2><span class="section-number">1.2</span>Newton's Second Law of Motion</h2>
+                <p>Newton's Second Law establishes the relationship between force, mass, and acceleration. It states that the acceleration of an object is directly proportional to the net force acting on it and inversely proportional to its mass.</p>
+                <p>This law can be expressed mathematically as F = ma, where F represents the net force, m is the mass of the object, and a is the acceleration. This equation tells us that heavier objects require more force to achieve the same acceleration as lighter objects.</p>
+                <p>The direction of acceleration is always in the same direction as the net force applied. This law is fundamental to understanding how forces cause changes in motion and is essential for solving problems in mechanics.</p>
+                <div class="equation">F = ma</div>
+                <p>Where F is force (in Newtons), m is mass (in kilograms), and a is acceleration (in meters per second squared).</p>
+            </div>
+
+            <div class="section" data-section="1.3">
+                <h2><span class="section-number">1.3</span>Newton's Third Law of Motion</h2>
+                <p>Newton's Third Law states that for every action, there is an equal and opposite reaction. This means that whenever one object exerts a force on another object, the second object exerts an equal force in the opposite direction on the first object.</p>
+                <p>This law explains many everyday phenomena. When you walk, you push backward against the ground, and the ground pushes forward on you with equal force. When a rocket launches, it pushes hot gases downward, and the gases push the rocket upward with equal force.</p>
+                <p>It's important to note that these action-reaction pairs act on different objects. The forces are equal in magnitude but opposite in direction, and they occur simultaneously.</p>
+                <div class="equation">F₁₂ = -F₂₁</div>
+                <p>This principle is crucial for understanding interactions between objects and is fundamental to the conservation of momentum.</p>
+            </div>
+
+            <div class="section" data-section="1.4">
+                <h2><span class="section-number">1.4</span>Applications and Problem Solving</h2>
+                <p>Understanding Newton's laws allows us to analyze and predict the motion of objects in various situations. From the trajectory of a baseball to the orbit of planets, these laws provide the foundation for classical mechanics.</p>
+                <p>When solving problems involving Newton's laws, it's essential to identify all forces acting on an object, draw free-body diagrams, and apply the appropriate law. Often, problems involve multiple objects and require the simultaneous application of all three laws.</p>
+                <p>Common applications include analyzing the motion of objects on inclined planes, understanding circular motion, and calculating the forces in pulley systems. These concepts are not only fundamental to physics but also essential for engineering applications.</p>
+                <div class="equation">ΣF = ma (Sum of all forces equals mass times acceleration)</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="explain-btn" id="explainBtn" disabled>
+            <span class="btn-text">Select a Section First</span>
+        </button>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <script>
+        let selectedSection = null;
+        let isPlaying = false;
+        let currentAudio = null;
+
+        // Section selection
+        document.querySelectorAll('.section').forEach(section => {
+            section.addEventListener('click', function() {
+                // Remove previous selection
+                document.querySelectorAll('.section').forEach(s => s.classList.remove('selected'));
+                
+                // Select current section
+                this.classList.add('selected');
+                selectedSection = this;
+                
+                // Update button
+                const btn = document.getElementById('explainBtn');
+                const btnText = btn.querySelector('.btn-text');
+                btn.disabled = false;
+                btnText.textContent = `🎤 Explain Section ${this.dataset.section}`;
+            });
+        });
+
+        // Explain button - FIXED FOR COMPLETE AUDIO
+        document.getElementById('explainBtn').addEventListener('click', async function() {
+            if (!selectedSection || isPlaying) return;
+            
+            const sectionText = selectedSection.innerText;
+            const sectionNumber = selectedSection.dataset.section;
+            
+            updateButton('🎤 Generating...', true);
+            showStatus('Processing physics explanation...');
+            
+            try {
+                const response = await fetch('http://localhost:5000/explain', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        text: sectionText,
+                        section: sectionNumber
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Server error: ${response.status}`);
+                }
+                
+                // Get complete audio file (not streaming)
+                const audioData = await response.arrayBuffer();
+                
+                showStatus('🔊 Playing audio...');
+                
+                // Play the complete audio
+                const audioBlob = new Blob([audioData], { type: 'audio/wav' });
+                const audioUrl = URL.createObjectURL(audioBlob);
+                
+                currentAudio = new Audio(audioUrl);
+                
+                currentAudio.onended = () => {
+                    isPlaying = false;
+                    updateButton(`🎤 Explain Section ${selectedSection.dataset.section}`, false);
+                    hideStatus();
+                    URL.revokeObjectURL(audioUrl);
+                    currentAudio = null;
+                };
+                
+                currentAudio.onerror = (e) => {
+                    console.error('Audio playback error:', e);
+                    throw new Error('Audio playback failed');
+                };
+                
+                isPlaying = true;
+                updateButton('🔊 Playing...', true);
+                await currentAudio.play();
+                
+            } catch (error) {
+                console.error('Error:', error);
+                showStatus(`❌ Error: ${error.message}`, true);
+                updateButton(`🎤 Explain Section ${selectedSection.dataset.section}`, false);
+                isPlaying = false;
+            }
+        });
+
+        function updateButton(text, disabled) {
+            const btn = document.getElementById('explainBtn');
+            
+            if (disabled) {
+                btn.innerHTML = `<div class="loading"></div><span class="btn-text">${text}</span>`;
+            } else {
+                btn.innerHTML = `<span class="btn-text">${text}</span>`;
+            }
+            btn.disabled = disabled;
+        }
+
+        function showStatus(message, isError = false) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = 'status show' + (isError ? ' error' : '');
+        }
+
+        function hideStatus() {
+            setTimeout(() => {
+                document.getElementById('status').classList.remove('show');
+            }, 2000);
+        }
+
+        // Stop audio if page is unloaded
+        window.addEventListener('beforeunload', () => {
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio = null;
+            }
+        });
+
+        // Stop button functionality (optional - can be added later)
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && currentAudio && isPlaying) {
+                currentAudio.pause();
+                isPlaying = false;
+                updateButton(`🎤 Explain Section ${selectedSection.dataset.section}`, false);
+                hideStatus();
+            }
+        });
+    </script>
+</body>
+</html>

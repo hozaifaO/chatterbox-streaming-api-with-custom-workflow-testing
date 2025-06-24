@@ -174,6 +174,14 @@
             background: rgba(244, 67, 54, 0.9);
         }
 
+        .status.streaming {
+            background: rgba(76, 175, 80, 0.9);
+        }
+
+        .status.buffering {
+            background: rgba(255, 152, 0, 0.9);
+        }
+
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
@@ -188,6 +196,72 @@
             border-radius: 8px;
             border: 1px solid #ffeaa7;
         }
+
+        /* Enhanced streaming indicator */
+        .streaming-indicator {
+            position: fixed;
+            bottom: 100px;
+            right: 30px;
+            background: rgba(76, 175, 80, 0.9);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            z-index: 1000;
+        }
+
+        .streaming-indicator.show {
+            opacity: 1;
+        }
+
+        .streaming-indicator.buffering {
+            background: rgba(255, 152, 0, 0.9);
+        }
+
+        .wave-bars {
+            display: inline-flex;
+            gap: 3px;
+            align-items: center;
+            margin-left: 10px;
+        }
+
+        .wave-bar {
+            width: 3px;
+            height: 15px;
+            background: white;
+            border-radius: 1px;
+            animation: wave 1.2s ease-in-out infinite;
+        }
+
+        .wave-bar:nth-child(2) { animation-delay: 0.1s; }
+        .wave-bar:nth-child(3) { animation-delay: 0.2s; }
+        .wave-bar:nth-child(4) { animation-delay: 0.3s; }
+
+        @keyframes wave {
+            0%, 100% { transform: scaleY(0.3); }
+            50% { transform: scaleY(1); }
+        }
+
+        /* Buffer indicator */
+        .buffer-indicator {
+            position: fixed;
+            bottom: 160px;
+            right: 30px;
+            background: rgba(255, 152, 0, 0.9);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 15px;
+            font-size: 0.8em;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            z-index: 1000;
+        }
+
+        .buffer-indicator.show {
+            opacity: 1;
+        }
     </style>
 </head>
 <body>
@@ -199,7 +273,7 @@
         
         <div class="book-content">
             <div class="selection-prompt">
-                Click on any section below to select it, then press "Explain" to hear an audio explanation
+                Click on any section below to select it, then press "Explain" to hear a streaming audio explanation with smart buffering
             </div>
             
             <div class="section" data-section="1.1">
@@ -245,11 +319,32 @@
     </div>
 
     <div class="status" id="status"></div>
+    
+    <div class="streaming-indicator" id="streamingIndicator">
+        🎵 Streaming audio
+        <div class="wave-bars">
+            <div class="wave-bar"></div>
+            <div class="wave-bar"></div>
+            <div class="wave-bar"></div>
+            <div class="wave-bar"></div>
+        </div>
+    </div>
+
+    <div class="buffer-indicator" id="bufferIndicator">
+        📦 Buffer: 0 chunks
+    </div>
 
     <script>
         let selectedSection = null;
         let isPlaying = false;
-        let currentAudio = null;
+        let currentAudioContext = null;
+        let currentSource = null;
+        let audioQueue = [];
+        let isProcessingQueue = false;
+        let chunksReceived = 0;
+        let chunksPlayed = 0;
+        let bufferSize = 0;
+        let playbackStarted = false;
 
         // Section selection
         document.querySelectorAll('.section').forEach(section => {
@@ -269,21 +364,28 @@
             });
         });
 
-        // UPDATED: Explain button with longer timeout and better error handling
+        // BUFFERED STREAMING AUDIO HANDLER
         document.getElementById('explainBtn').addEventListener('click', async function() {
             if (!selectedSection || isPlaying) return;
             
             const sectionText = selectedSection.innerText;
             const sectionNumber = selectedSection.dataset.section;
             
+            // Reset counters
+            chunksReceived = 0;
+            chunksPlayed = 0;
+            bufferSize = 0;
+            playbackStarted = false;
+            
             updateButton('🤖 Generating explanation...', true);
             showStatus('Processing with Azure DeepSeek-V3...');
             
-            // Create AbortController for manual timeout control
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes timeout
-
             try {
+                // Initialize Web Audio API
+                if (!currentAudioContext) {
+                    currentAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                
                 const response = await fetch('http://localhost:5000/explain', {
                     method: 'POST',
                     headers: {
@@ -292,63 +394,229 @@
                     body: JSON.stringify({
                         text: sectionText,
                         section: sectionNumber
-                    }),
-                    signal: controller.signal // Add abort signal
+                    })
                 });
-                
-                clearTimeout(timeoutId); // Clear timeout if request completes
                 
                 if (!response.ok) {
                     throw new Error(`Server error: ${response.status} - ${response.statusText}`);
                 }
                 
-                updateButton('🎵 Generating audio...', true);
-                showStatus('🎤 Converting to speech...');
-                
-                // Get complete audio file
-                const audioData = await response.arrayBuffer();
-                
-                showStatus('🔊 Playing audio...');
-                
-                // Play the complete audio
-                const audioBlob = new Blob([audioData], { type: 'audio/wav' });
-                const audioUrl = URL.createObjectURL(audioBlob);
-                
-                currentAudio = new Audio(audioUrl);
-                
-                currentAudio.onended = () => {
-                    isPlaying = false;
-                    updateButton(`🎤 Explain Section ${selectedSection.dataset.section}`, false);
-                    hideStatus();
-                    URL.revokeObjectURL(audioUrl);
-                    currentAudio = null;
-                };
-                
-                currentAudio.onerror = (e) => {
-                    console.error('Audio playback error:', e);
-                    throw new Error('Audio playback failed');
-                };
+                updateButton('📦 Buffering audio...', true);
+                showStatus('🎤 Building audio buffer...', false, 'buffering');
+                showStreamingIndicator(true, 'buffering');
+                showBufferIndicator(true);
                 
                 isPlaying = true;
-                updateButton('🔊 Playing...', true);
-                await currentAudio.play();
+                audioQueue = [];
+                isProcessingQueue = false;
+                
+                // Process buffered streaming audio
+                await processBufferedStreamingAudio(response);
                 
             } catch (error) {
-                clearTimeout(timeoutId); // Clear timeout on error
                 console.error('Error:', error);
                 
                 let errorMessage = error.message;
-                if (error.name === 'AbortError') {
-                    errorMessage = 'Request timed out (5 minutes). Try a shorter section.';
-                } else if (error.message.includes('Failed to fetch')) {
+                if (error.message.includes('Failed to fetch')) {
                     errorMessage = 'Cannot connect to server. Is it running?';
                 }
                 
                 showStatus(`❌ Error: ${errorMessage}`, true);
                 updateButton(`🎤 Explain Section ${selectedSection.dataset.section}`, false);
                 isPlaying = false;
+                showStreamingIndicator(false);
+                showBufferIndicator(false);
             }
         });
+
+        async function processBufferedStreamingAudio(response) {
+            const reader = response.body.getReader();
+            let buffer = new Uint8Array(0);
+            let bufferThreshold = 3; // Start playing after 3 chunks buffered
+            
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    
+                    if (done) {
+                        console.log('Buffered streaming complete');
+                        break;
+                    }
+                    
+                    // Accumulate data
+                    const newBuffer = new Uint8Array(buffer.length + value.length);
+                    newBuffer.set(buffer);
+                    newBuffer.set(value, buffer.length);
+                    buffer = newBuffer;
+                    
+                    // Try to extract complete WAV files
+                    const extracted = extractWAVFiles(buffer);
+                    if (extracted.wavFiles.length > 0) {
+                        buffer = extracted.remainingBuffer;
+                        
+                        // Process each WAV file
+                        for (const wavFile of extracted.wavFiles) {
+                            await addToAudioBuffer(wavFile);
+                            
+                            // Start playback once we have enough buffer
+                            if (!playbackStarted && audioQueue.length >= bufferThreshold) {
+                                console.log(`Starting playback with ${audioQueue.length} chunks buffered`);
+                                updateButton('🔊 Playing...', true);
+                                showStatus('🎵 Playing with buffer...', false, 'streaming');
+                                showStreamingIndicator(true, 'playing');
+                                playbackStarted = true;
+                                processAudioQueue();
+                            }
+                        }
+                    }
+                }
+                
+                // Process any remaining audio
+                if (buffer.length > 0) {
+                    const finalWav = extractWAVFiles(buffer, true);
+                    for (const wavFile of finalWav.wavFiles) {
+                        await addToAudioBuffer(wavFile);
+                    }
+                }
+                
+                // If we never started playback (very short audio), start now
+                if (!playbackStarted && audioQueue.length > 0) {
+                    console.log(`Starting playback with remaining ${audioQueue.length} chunks`);
+                    updateButton('🔊 Playing...', true);
+                    showStatus('🎵 Playing final audio...', false, 'streaming');
+                    showStreamingIndicator(true, 'playing');
+                    playbackStarted = true;
+                    processAudioQueue();
+                }
+                
+                // Wait for all audio to finish
+                await waitForAudioQueueComplete();
+                
+            } finally {
+                isPlaying = false;
+                playbackStarted = false;
+                updateButton(`🎤 Explain Section ${selectedSection.dataset.section}`, false);
+                hideStatus();
+                showStreamingIndicator(false);
+                showBufferIndicator(false);
+            }
+        }
+
+        async function addToAudioBuffer(wavData) {
+            try {
+                const audioBuffer = await currentAudioContext.decodeAudioData(wavData.buffer.slice(wavData.byteOffset));
+                
+                audioQueue.push(audioBuffer);
+                chunksReceived++;
+                bufferSize = audioQueue.length;
+                
+                updateBufferIndicator();
+                
+                console.log(`Added chunk ${chunksReceived} to buffer (buffer size: ${bufferSize})`);
+                
+            } catch (error) {
+                console.error('Error decoding audio chunk:', error);
+            }
+        }
+
+        function processAudioQueue() {
+            if (isProcessingQueue) return;
+            
+            isProcessingQueue = true;
+            
+            function playNext() {
+                if (audioQueue.length === 0) {
+                    if (playbackStarted && !isPlaying) {
+                        // Playback finished
+                        isProcessingQueue = false;
+                        return;
+                    }
+                    // Wait for more chunks if streaming is still active
+                    setTimeout(() => {
+                        if (audioQueue.length > 0 || !playbackStarted) {
+                            playNext();
+                        } else {
+                            isProcessingQueue = false;
+                        }
+                    }, 100);
+                    return;
+                }
+                
+                const audioBuffer = audioQueue.shift();
+                chunksPlayed++;
+                bufferSize = audioQueue.length;
+                updateBufferIndicator();
+                
+                console.log(`Playing chunk ${chunksPlayed} (buffer: ${bufferSize} remaining)`);
+                
+                const source = currentAudioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(currentAudioContext.destination);
+                
+                source.onended = () => {
+                    playNext();
+                };
+                
+                source.start();
+                currentSource = source;
+            }
+            
+            playNext();
+        }
+
+        function extractWAVFiles(buffer, forceFinal = false) {
+            const wavFiles = [];
+            let remainingBuffer = buffer;
+            
+            while (true) {
+                const riffIndex = findRIFF(remainingBuffer);
+                if (riffIndex === -1) break;
+                
+                if (riffIndex > 0) {
+                    remainingBuffer = remainingBuffer.slice(riffIndex);
+                }
+                
+                if (remainingBuffer.length < 12) break;
+                
+                // Read WAV file size
+                const sizeBytes = remainingBuffer.slice(4, 8);
+                const size = new DataView(sizeBytes.buffer, sizeBytes.byteOffset, 4).getUint32(0, true) + 8;
+                
+                if (remainingBuffer.length < size && !forceFinal) break;
+                
+                const actualSize = forceFinal ? remainingBuffer.length : size;
+                const wavFile = remainingBuffer.slice(0, actualSize);
+                wavFiles.push(wavFile);
+                
+                remainingBuffer = remainingBuffer.slice(actualSize);
+            }
+            
+            return { wavFiles, remainingBuffer };
+        }
+
+        function findRIFF(buffer) {
+            const riff = new Uint8Array([0x52, 0x49, 0x46, 0x46]); // "RIFF"
+            for (let i = 0; i <= buffer.length - 4; i++) {
+                if (buffer[i] === riff[0] && buffer[i+1] === riff[1] && 
+                    buffer[i+2] === riff[2] && buffer[i+3] === riff[3]) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        async function waitForAudioQueueComplete() {
+            return new Promise((resolve) => {
+                function check() {
+                    if (audioQueue.length === 0 && !isProcessingQueue) {
+                        resolve();
+                    } else {
+                        setTimeout(check, 100);
+                    }
+                }
+                check();
+            });
+        }
 
         function updateButton(text, disabled) {
             const btn = document.getElementById('explainBtn');
@@ -361,33 +629,72 @@
             btn.disabled = disabled;
         }
 
-        function showStatus(message, isError = false) {
+        function showStatus(message, isError = false, type = 'normal') {
             const status = document.getElementById('status');
             status.textContent = message;
-            status.className = 'status show' + (isError ? ' error' : '');
+            status.className = `status show ${isError ? 'error' : ''} ${type === 'streaming' ? 'streaming' : ''} ${type === 'buffering' ? 'buffering' : ''}`;
         }
 
         function hideStatus() {
             setTimeout(() => {
                 document.getElementById('status').classList.remove('show');
-            }, 3000); // Longer display time
+            }, 3000);
+        }
+
+        function showStreamingIndicator(show, mode = 'playing') {
+            const indicator = document.getElementById('streamingIndicator');
+            if (show) {
+                indicator.classList.add('show');
+                if (mode === 'buffering') {
+                    indicator.classList.add('buffering');
+                    indicator.innerHTML = `📦 Buffering<div class="wave-bars"><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div></div>`;
+                } else {
+                    indicator.classList.remove('buffering');
+                    indicator.innerHTML = `🎵 Streaming<div class="wave-bars"><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div></div>`;
+                }
+            } else {
+                indicator.classList.remove('show', 'buffering');
+            }
+        }
+
+        function showBufferIndicator(show) {
+            const indicator = document.getElementById('bufferIndicator');
+            if (show) {
+                indicator.classList.add('show');
+            } else {
+                indicator.classList.remove('show');
+            }
+        }
+
+        function updateBufferIndicator() {
+            const indicator = document.getElementById('bufferIndicator');
+            indicator.textContent = `📦 Buffer: ${bufferSize} chunks (${chunksPlayed} played)`;
         }
 
         // Stop audio if page is unloaded
         window.addEventListener('beforeunload', () => {
-            if (currentAudio) {
-                currentAudio.pause();
-                currentAudio = null;
+            if (currentSource) {
+                currentSource.stop();
+            }
+            if (currentAudioContext) {
+                currentAudioContext.close();
             }
         });
 
         // ESC key to stop audio
         document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape' && currentAudio && isPlaying) {
-                currentAudio.pause();
+            if (e.key === 'Escape' && isPlaying) {
+                if (currentSource) {
+                    currentSource.stop();
+                }
+                audioQueue = [];
+                isProcessingQueue = false;
                 isPlaying = false;
+                playbackStarted = false;
                 updateButton(`🎤 Explain Section ${selectedSection.dataset.section}`, false);
                 hideStatus();
+                showStreamingIndicator(false);
+                showBufferIndicator(false);
             }
         });
     </script>

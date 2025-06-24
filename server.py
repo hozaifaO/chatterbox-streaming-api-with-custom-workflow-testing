@@ -175,7 +175,7 @@ def smart_text_split(text: str, max_words_per_chunk: int = 100):
     return chunks if chunks else [text]
 
 def audio_generator(text: str, voice_path: Optional[Path] = None, **kwargs) -> Generator[bytes, None, None]:
-    """Generate complete audio with smart text chunking to handle unlimited length"""
+    """Generate audio with TRUE streaming - yield chunks as they're generated"""
     if model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
     
@@ -187,26 +187,22 @@ def audio_generator(text: str, voice_path: Optional[Path] = None, **kwargs) -> G
     
     exaggeration, cfg_weight, temperature = validate_emotional_params(exaggeration, cfg_weight, temperature)
     
-    logger.info(f"Generating audio for text: '{text[:100]}{'...' if len(text) > 100 else ''}'")
-    logger.info(f"Text length: {len(text)} chars, {len(text.split())} words")
-    logger.info(f"Parameters - exaggeration: {exaggeration}, cfg_weight: {cfg_weight}, temperature: {temperature}, chunk_size: {chunk_size}")
+    logger.info(f"TRUE STREAMING: Generating audio for text: '{text[:100]}{'...' if len(text) > 100 else ''}'")
+    logger.info(f"TRUE STREAMING: Text length: {len(text)} chars, {len(text.split())} words")
+    logger.info(f"TRUE STREAMING: Parameters - exaggeration: {exaggeration}, cfg_weight: {cfg_weight}, temperature: {temperature}, chunk_size: {chunk_size}")
     
     try:
         # Split text into manageable chunks for ChatterboxTTS
         text_chunks = smart_text_split(text, max_words_per_chunk=100)
-        logger.info(f"Split into {len(text_chunks)} text chunks")
+        logger.info(f"TRUE STREAMING: Split into {len(text_chunks)} text chunks")
         
-        all_audio_chunks = []
         total_chunks_processed = 0
         
-        # Process each text chunk
+        # Process each text chunk and STREAM immediately
         for text_idx, text_chunk in enumerate(text_chunks):
-            logger.info(f"Processing text chunk {text_idx + 1}/{len(text_chunks)}: '{text_chunk[:60]}{'...' if len(text_chunk) > 60 else ''}'")
-            logger.info(f"Text chunk {text_idx + 1} has {len(text_chunk.split())} words")
+            logger.info(f"TRUE STREAMING: Processing text chunk {text_idx + 1}/{len(text_chunks)}: '{text_chunk[:60]}{'...' if len(text_chunk) > 60 else ''}'")
             
-            # Process this text chunk with generate_stream
-            chunk_audio_parts = []
-            
+            # Process this text chunk with generate_stream and yield each chunk immediately
             for audio_chunk, metrics in model.generate_stream(
                 text_chunk,
                 audio_prompt_path=str(voice_path) if voice_path else None,
@@ -217,48 +213,33 @@ def audio_generator(text: str, voice_path: Optional[Path] = None, **kwargs) -> G
                 print_metrics=False
             ):
                 total_chunks_processed += 1
-                chunk_audio_parts.append(audio_chunk)
                 
-                # Log chunk info
                 chunk_duration = audio_chunk.shape[-1] / model.sr
-                logger.debug(f"Received audio chunk {total_chunks_processed}, shape: {audio_chunk.shape}, duration: {chunk_duration:.3f}s")
+                logger.info(f"TRUE STREAMING: Yielding chunk {total_chunks_processed}, duration: {chunk_duration:.3f}s")
+                
+                # Convert to WAV bytes and yield immediately
+                buffer = io.BytesIO()
+                torchaudio.save(buffer, audio_chunk, model.sr, format="wav")
+                buffer.seek(0)
+                
+                # YIELD IMMEDIATELY
+                yield buffer.read()
                 
                 # Log metrics if available
                 if metrics:
                     if hasattr(metrics, 'rtf') and metrics.rtf:
-                        logger.debug(f"Audio chunk {total_chunks_processed}, RTF: {metrics.rtf:.3f}")
+                        logger.debug(f"TRUE STREAMING: Chunk {total_chunks_processed}, RTF: {metrics.rtf:.3f}")
                     if hasattr(metrics, 'latency_to_first_chunk') and metrics.latency_to_first_chunk and total_chunks_processed == 1:
-                        logger.info(f"First chunk latency: {metrics.latency_to_first_chunk:.3f}s")
-            
-            # Concatenate audio parts for this text chunk
-            if chunk_audio_parts:
-                text_chunk_audio = torch.cat(chunk_audio_parts, dim=-1)
-                all_audio_chunks.append(text_chunk_audio)
-                text_chunk_duration = text_chunk_audio.shape[-1] / model.sr
-                logger.info(f"Text chunk {text_idx + 1} complete: {len(chunk_audio_parts)} audio chunks, {text_chunk_duration:.3f}s duration")
-            
-        # Concatenate ALL audio chunks from ALL text chunks
-        if all_audio_chunks:
-            final_audio = torch.cat(all_audio_chunks, dim=-1)
-            final_duration = final_audio.shape[-1] / model.sr
-            logger.info(f"FINAL AUDIO: {len(text_chunks)} text chunks, {total_chunks_processed} audio chunks total")
-            logger.info(f"Final audio shape: {final_audio.shape}, duration: {final_duration:.3f}s")
-            
-            # Convert to bytes and yield as single complete WAV file
-            buffer = io.BytesIO()
-            torchaudio.save(buffer, final_audio, model.sr, format="wav")
-            buffer.seek(0)
-            yield buffer.read()
-        else:
-            logger.error("No audio chunks were generated!")
-            raise HTTPException(status_code=500, detail="No audio generated")
+                        logger.info(f"TRUE STREAMING: First chunk latency: {metrics.latency_to_first_chunk:.3f}s")
+        
+        logger.info(f"TRUE STREAMING: Complete! Streamed {total_chunks_processed} audio chunks")
                     
     except Exception as e:
-        logger.error(f"Error generating audio: {e}")
+        logger.error(f"Error generating TRUE streaming audio: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 def audio_generator_enhanced(text: str, voice_path: Optional[Path] = None, **kwargs) -> Generator[bytes, None, None]:
-    """Enhanced audio generator with smart text chunking to handle unlimited length"""
+    """Enhanced audio generator with TRUE streaming - yields chunks as they're generated"""
     if model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
     
@@ -273,7 +254,7 @@ def audio_generator_enhanced(text: str, voice_path: Optional[Path] = None, **kwa
     
     # Optimize chunk size for low latency
     if low_latency:
-        chunk_size = min(25, chunk_size)  # Smaller speech token chunks for lower latency
+        chunk_size = min(25, chunk_size)
     
     # Validate and clamp parameters
     exaggeration = max(0.0, min(1.0, exaggeration))
@@ -285,25 +266,22 @@ def audio_generator_enhanced(text: str, voice_path: Optional[Path] = None, **kwa
     if custom_voice_path:
         voice_path = Path(custom_voice_path) if Path(custom_voice_path).exists() else voice_path
     
-    logger.info(f"Enhanced generation for text: '{text[:100]}{'...' if len(text) > 100 else ''}'")
-    logger.info(f"Enhanced text length: {len(text)} chars, {len(text.split())} words")
-    logger.info(f"Enhanced parameters - exaggeration: {exaggeration}, cfg_weight: {cfg_weight}, temperature: {temperature}, chunk_size: {chunk_size}")
+    logger.info(f"TRUE STREAMING: Enhanced generation for text: '{text[:100]}{'...' if len(text) > 100 else ''}'")
+    logger.info(f"TRUE STREAMING: Enhanced text length: {len(text)} chars, {len(text.split())} words")
+    logger.info(f"TRUE STREAMING: Enhanced parameters - exaggeration: {exaggeration}, cfg_weight: {cfg_weight}, temperature: {temperature}, chunk_size: {chunk_size}")
     
     try:
         # Split text into manageable chunks for ChatterboxTTS
         text_chunks = smart_text_split(text, max_words_per_chunk=80 if low_latency else 100)
-        logger.info(f"Enhanced: Split into {len(text_chunks)} text chunks")
+        logger.info(f"TRUE STREAMING: Enhanced: Split into {len(text_chunks)} text chunks")
         
-        all_audio_chunks = []
         total_chunks_processed = 0
         
-        # Process each text chunk
+        # Process each text chunk and STREAM audio chunks immediately
         for text_idx, text_chunk in enumerate(text_chunks):
-            logger.info(f"Enhanced processing text chunk {text_idx + 1}/{len(text_chunks)}: '{text_chunk[:60]}{'...' if len(text_chunk) > 60 else ''}'")
+            logger.info(f"TRUE STREAMING: Enhanced processing text chunk {text_idx + 1}/{len(text_chunks)}: '{text_chunk[:60]}{'...' if len(text_chunk) > 60 else ''}'")
             
-            # Process this text chunk with generate_stream
-            chunk_audio_parts = []
-            
+            # Process this text chunk with generate_stream and yield each audio chunk immediately
             for audio_chunk, metrics in model.generate_stream(
                 text_chunk,
                 audio_prompt_path=str(voice_path) if voice_path else None,
@@ -313,43 +291,30 @@ def audio_generator_enhanced(text: str, voice_path: Optional[Path] = None, **kwa
                 chunk_size=chunk_size
             ):
                 total_chunks_processed += 1
-                chunk_audio_parts.append(audio_chunk)
                 
                 chunk_duration = audio_chunk.shape[-1] / model.sr
-                logger.debug(f"Enhanced received audio chunk {total_chunks_processed}, shape: {audio_chunk.shape}, duration: {chunk_duration:.3f}s")
+                logger.info(f"TRUE STREAMING: Enhanced yielding audio chunk {total_chunks_processed}, duration: {chunk_duration:.3f}s")
                 
-                # Enhanced metrics logging
+                # Convert audio chunk to WAV bytes and yield immediately
+                buffer = io.BytesIO()
+                torchaudio.save(buffer, audio_chunk, model.sr, format="wav")
+                buffer.seek(0)
+                wav_bytes = buffer.read()
+                
+                # YIELD IMMEDIATELY - don't wait for more chunks!
+                yield wav_bytes
+                
+                # Log metrics if available
                 if metrics:
                     if hasattr(metrics, 'rtf') and metrics.rtf:
-                        logger.debug(f"Enhanced audio chunk {total_chunks_processed}, RTF: {metrics.rtf:.3f}")
+                        logger.debug(f"TRUE STREAMING: Enhanced audio chunk {total_chunks_processed}, RTF: {metrics.rtf:.3f}")
                     if hasattr(metrics, 'latency_to_first_chunk') and metrics.latency_to_first_chunk and total_chunks_processed == 1:
-                        logger.info(f"Enhanced first chunk latency: {metrics.latency_to_first_chunk:.3f}s")
-            
-            # Concatenate audio parts for this text chunk
-            if chunk_audio_parts:
-                text_chunk_audio = torch.cat(chunk_audio_parts, dim=-1)
-                all_audio_chunks.append(text_chunk_audio)
-                text_chunk_duration = text_chunk_audio.shape[-1] / model.sr
-                logger.info(f"Enhanced text chunk {text_idx + 1} complete: {len(chunk_audio_parts)} audio chunks, {text_chunk_duration:.3f}s duration")
-                    
-        # Concatenate ALL audio chunks from ALL text chunks
-        if all_audio_chunks:
-            final_audio = torch.cat(all_audio_chunks, dim=-1)
-            final_duration = final_audio.shape[-1] / model.sr
-            logger.info(f"Enhanced FINAL AUDIO: {len(text_chunks)} text chunks, {total_chunks_processed} audio chunks total")
-            logger.info(f"Enhanced final audio shape: {final_audio.shape}, duration: {final_duration:.3f}s")
-            
-            # Convert to bytes and yield as single complete WAV file
-            buffer = io.BytesIO()
-            torchaudio.save(buffer, final_audio, model.sr, format="wav")
-            buffer.seek(0)
-            yield buffer.read()
-        else:
-            logger.error("Enhanced: No audio chunks were generated!")
-            raise HTTPException(status_code=500, detail="No audio generated")
+                        logger.info(f"TRUE STREAMING: Enhanced first chunk latency: {metrics.latency_to_first_chunk:.3f}s")
+        
+        logger.info(f"TRUE STREAMING: Enhanced complete! {len(text_chunks)} text chunks, {total_chunks_processed} audio chunks streamed")
                         
     except Exception as e:
-        logger.error(f"Error in enhanced generation: {e}")
+        logger.error(f"Error in TRUE streaming enhanced generation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.on_event("startup")
